@@ -269,6 +269,11 @@ void AddVaapiFactory(
     std::vector<VideoEncoderBackendFactory>& factories,
     bool preferred) {
 #if defined(USE_VAAPI_VIDEO_CODEC)
+  // Opt-in only: on Intel iHD (Meteor Lake) the first frame segfaults inside
+  // vaRenderPicture and takes the whole app down; software H.264 is safe.
+  if (!preferred) {
+    return;
+  }
   if (webrtc::VAAPIVideoEncoderFactory::IsSupported()) {
     AddBackendFactory(
         factories,
