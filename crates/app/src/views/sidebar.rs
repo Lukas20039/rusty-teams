@@ -95,6 +95,7 @@ pub enum SidebarTab {
     Channels,
     Calendar,
     Calls,
+    OneDrive,
     Agents,
 }
 
@@ -106,6 +107,7 @@ impl SidebarTab {
             SidebarTab::Channels => tr("rail.teams"),
             SidebarTab::Calendar => tr("rail.calendar"),
             SidebarTab::Calls => tr("rail.calls"),
+            SidebarTab::OneDrive => tr("rail.onedrive"),
             SidebarTab::Agents => tr("rail.agents"),
         }
     }
@@ -509,6 +511,10 @@ impl SidebarView {
         self.open_tab(SidebarTab::Calls, cx);
     }
 
+    pub fn show_onedrive(&mut self, cx: &mut Context<Self>) {
+        self.open_tab(SidebarTab::OneDrive, cx);
+    }
+
     pub fn show_calendar(&mut self, cx: &mut Context<Self>) {
         self.open_tab(SidebarTab::Calendar, cx);
     }
@@ -583,6 +589,7 @@ impl SidebarView {
             SidebarTab::Activity
             | SidebarTab::Calendar
             | SidebarTab::Calls
+            | SidebarTab::OneDrive
             | SidebarTab::Agents => None,
         };
         if let Some(selection) = selection {
@@ -2146,7 +2153,9 @@ impl Render for SidebarView {
                 Some(panel) => panel.clone().into_any_element(),
                 None => div().into_any_element(),
             },
-            SidebarTab::Calls | SidebarTab::Calendar => div().into_any_element(),
+            SidebarTab::Calls | SidebarTab::Calendar | SidebarTab::OneDrive => {
+                div().into_any_element()
+            }
         };
         let header = match self.tab {
             SidebarTab::Chats => Some(
@@ -2172,7 +2181,10 @@ impl Render for SidebarView {
                     .child(self.channel_filter_bar(cx)),
             ),
             SidebarTab::Agents => Some(page_header(&self.tab.title())),
-            SidebarTab::Activity | SidebarTab::Calls | SidebarTab::Calendar => None,
+            SidebarTab::Activity
+            | SidebarTab::Calls
+            | SidebarTab::Calendar
+            | SidebarTab::OneDrive => None,
         };
         v_flex()
             .debug_selector(|| "shell/islands/sidebar".into())

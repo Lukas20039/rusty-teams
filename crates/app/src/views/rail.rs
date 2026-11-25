@@ -89,6 +89,13 @@ fn rail_items(
             icon: IconName::Phone,
             badge: RailBadge::None,
         },
+        RailItem {
+            tab: SidebarTab::OneDrive,
+            label: tr("rail.onedrive"),
+            shortcut_label: "Open OneDrive",
+            icon: IconName::Cloud,
+            badge: RailBadge::None,
+        },
     ];
     if !calendar {
         items.retain(|item| item.tab != SidebarTab::Calendar);
@@ -279,7 +286,8 @@ mod tests {
                 SidebarTab::Chats,
                 SidebarTab::Channels,
                 SidebarTab::Calendar,
-                SidebarTab::Calls
+                SidebarTab::Calls,
+                SidebarTab::OneDrive
             ]
         );
     }
@@ -292,20 +300,20 @@ mod tests {
             .map(|item| item.tab)
             .collect();
         assert!(!tabs.contains(&SidebarTab::Calendar));
-        assert_eq!(tabs.len(), 4);
+        assert_eq!(tabs.len(), 5);
     }
 
     #[test]
     fn agents_comes_last_and_only_when_actions_exist() {
         apply_locale("en");
-        assert_eq!(rail_items(0, 0, false, true, None).len(), 5);
+        assert_eq!(rail_items(0, 0, false, true, None).len(), 6);
         let with_agents = rail_items(0, 0, false, true, Some(2));
-        assert_eq!(with_agents.len(), 6);
-        assert_eq!(with_agents[5].tab, SidebarTab::Agents);
-        assert_eq!(with_agents[5].label, tr("rail.agents"));
-        assert_eq!(with_agents[5].badge, RailBadge::Count(2));
+        assert_eq!(with_agents.len(), 7);
+        assert_eq!(with_agents[6].tab, SidebarTab::Agents);
+        assert_eq!(with_agents[6].label, tr("rail.agents"));
+        assert_eq!(with_agents[6].badge, RailBadge::Count(2));
         assert_eq!(
-            rail_items(0, 0, false, true, Some(0))[5].badge,
+            rail_items(0, 0, false, true, Some(0))[6].badge,
             RailBadge::None
         );
     }

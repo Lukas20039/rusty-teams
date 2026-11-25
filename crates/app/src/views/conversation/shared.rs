@@ -22,8 +22,8 @@ use crate::views::channel_tabs::{
     tab_action,
 };
 use crate::views::shared_tab::{
-    LibraryView, Listing, MessagesView, SharedCommand, SharedRun, SharedScope, render_library,
-    render_messages,
+    EMPTY_LIBRARY, LibraryView, Listing, MessagesView, SharedCommand, SharedRun, SharedScope,
+    render_library, render_messages,
 };
 
 const LIBRARY_KEY: &str = "library";
@@ -283,6 +283,9 @@ impl ConversationView {
                             .filter(|_| self.shared.new_folder_open),
                         status: status.as_deref(),
                         download_states: self.library_download_states(),
+                        lead: None,
+                        web_label: "Open in SharePoint \u{2197}",
+                        empty: EMPTY_LIBRARY,
                     },
                     &run,
                 )

@@ -74,6 +74,7 @@ pub mod message_row;
 pub mod new_chat;
 pub mod new_meeting_dialog;
 pub mod notice_toast;
+pub mod onedrive_page;
 pub mod pin_banner;
 #[cfg(test)]
 mod popup_tooltip_tests;
