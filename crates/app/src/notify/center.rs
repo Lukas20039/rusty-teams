@@ -703,6 +703,31 @@ impl NotificationCenter {
         self.sync_windows(cx);
     }
 
+    pub fn present_mail(
+        &mut self,
+        message_id: &str,
+        sender: &str,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let decision = self.own_feature_decision(cx);
+        if !decision.toast {
+            return;
+        }
+        let id = self
+            .stack
+            .push_mail(message_id, sender, text, Instant::now());
+        if let Some(model) = self.stack.get_mut(id) {
+            model.time = chrono::Local::now()
+                .format(crate::format::clock_format())
+                .to_string();
+        }
+        if decision.sound && !self.app.read(cx).mode.demo {
+            self.play_notification_sound(cx);
+        }
+        self.sync_windows(cx);
+    }
+
     pub fn agent_toast_follow_up(&mut self, id: u64, cx: &mut Context<Self>) {
         let Some(agent) = self.stack.get(id).and_then(|toast| toast.agent.clone()) else {
             return;
@@ -1773,6 +1798,23 @@ impl NotificationCenter {
 
     pub fn activate(&mut self, id: u64, cx: &mut Context<Self>) {
         if self.is_dismissed(id) {
+            return;
+        }
+        if let Some(message_id) = self
+            .stack
+            .get(id)
+            .filter(|toast| toast.mail)
+            .map(|toast| toast.message_id.clone())
+        {
+            self.drop_toast(id, cx);
+            self.raise_main_window(cx);
+            cx.set_global(crate::views::mail_page::MailFocus(Some(message_id)));
+            cx.refresh_windows();
+            self.main_window
+                .update(cx, |_, window, cx| {
+                    window.dispatch_action(Box::new(crate::views::shortcuts::OpenMail), cx)
+                })
+                .ok();
             return;
         }
         if let Some((org, conversation_id)) = self

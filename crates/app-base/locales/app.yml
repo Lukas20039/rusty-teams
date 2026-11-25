@@ -2175,6 +2175,30 @@ onedrive:
     en: The preview shows the first 40 pages, open the document for all of them
     de: Die Vorschau zeigt die ersten 40 Seiten, für alle das Dokument öffnen
 mail:
+  folders:
+    en: Show or hide folders
+    de: Ordner ein- oder ausblenden
+  refresh:
+    en: Check for new mail
+    de: Nach neuen E-Mails suchen
+  bold:
+    en: Bold
+    de: Fett
+  italic:
+    en: Italic
+    de: Kursiv
+  underline:
+    en: Underline
+    de: Unterstrichen
+  smaller:
+    en: Smaller text
+    de: Kleinere Schrift
+  normal_size:
+    en: Normal text
+    de: Normale Schrift
+  larger:
+    en: Larger text
+    de: Größere Schrift
   new:
     en: New mail
     de: Neue E-Mail

@@ -198,6 +198,8 @@ pub struct ToastModel {
     pub urgent: bool,
     /// Set for a message in an org that is not open; clicking switches to that org.
     pub org: Option<app_base::orgs::Org>,
+    /// A new Outlook mail; `message_id` holds the mail id and clicking opens it on the Mail page.
+    pub mail: bool,
 }
 
 impl ToastModel {
@@ -239,6 +241,7 @@ impl ToastStack {
             toast.agent.is_none()
                 && !toast.status_change
                 && toast.org.is_none()
+                && !toast.mail
                 && !toast.dismissed
                 && !toast.is_leaving()
                 && toast.conversation_id == incoming.conversation_id
@@ -284,6 +287,7 @@ impl ToastStack {
             status_change: false,
             urgent: incoming.is_urgent(),
             org: None,
+            mail: false,
         });
         PushOutcome {
             id: self.next_id,
@@ -324,6 +328,7 @@ impl ToastStack {
             status_change: false,
             urgent: false,
             org: None,
+            mail: false,
         });
         self.next_id
     }
@@ -361,6 +366,7 @@ impl ToastStack {
             status_change: true,
             urgent: false,
             org: None,
+            mail: false,
         });
         self.next_id
     }
@@ -400,6 +406,38 @@ impl ToastStack {
             status_change: false,
             urgent: false,
             org: Some(message.org.clone()),
+            mail: false,
+        });
+        self.next_id
+    }
+
+    pub fn push_mail(&mut self, message_id: &str, sender: &str, text: &str, now: Instant) -> u64 {
+        self.next_id += 1;
+        let queued = self.toasts.len() >= MAX_VISIBLE;
+        self.toasts.push(ToastModel {
+            id: self.next_id,
+            conversation_id: String::new(),
+            message_id: message_id.to_owned(),
+            kind: ChatKind::Direct,
+            chat_title: String::new(),
+            sender_id: None,
+            sender_name: sender.to_owned(),
+            preview: Preview::Text(text.to_owned()),
+            mentions_me: false,
+            count: 1,
+            timer: ToastTimer::new(now, false),
+            reply: ReplyState::Closed,
+            reply_text: String::new(),
+            hovered: false,
+            time: String::new(),
+            queued,
+            dismissed: false,
+            fade: Fade::new(0., 1., now, FADE_IN, Curve::Linear),
+            agent: None,
+            status_change: false,
+            urgent: false,
+            org: None,
+            mail: true,
         });
         self.next_id
     }

@@ -537,9 +537,10 @@ impl Render for ToastView {
                         .child(self.avatar(&model, fill, cx))
                         .child(self.body(&model, &text, hovered)),
                 )
-                .when(!model.status_change && model.org.is_none(), |content| {
-                    content.child(self.action_row(mention, cx))
-                }),
+                .when(
+                    !model.status_change && model.org.is_none() && !model.mail,
+                    |content| content.child(self.action_row(mention, cx)),
+                ),
         };
         let center = self.center.clone();
         let hover_center = self.center.clone();

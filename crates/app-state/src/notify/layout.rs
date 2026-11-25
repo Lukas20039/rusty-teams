@@ -203,6 +203,7 @@ mod tests {
             status_change: false,
             urgent: false,
             org: None,
+            mail: false,
         };
         assert_eq!(toast_height(&model("Hi"), 1), 112.);
         assert_eq!(toast_height(&model("Hi"), 2), 130.);

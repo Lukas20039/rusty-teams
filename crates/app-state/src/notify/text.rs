@@ -113,6 +113,7 @@ mod tests {
             status_change: false,
             urgent: false,
             org: None,
+            mail: false,
         }
     }
 

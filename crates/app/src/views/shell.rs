@@ -425,6 +425,7 @@ impl AppShell {
                 (notifications, call_windows)
             }
         };
+        mail_page.update(cx, |page, _| page.set_notifications(notifications.clone()));
         let user_input = cx.global::<UserInputHandle>().0.clone();
         let escape_observation = cx.observe_keystrokes(|this, event, _, cx| {
             this.user_input.touch();

@@ -1,33 +1,45 @@
 //! The Mail page: the signed-in user's Outlook mailbox through the tokens the Teams session already
 //! has. Graph reads and files mail; Outlook REST sends it (see `graph::mail`).
 
+use std::collections::HashSet;
 use std::future::Future;
+use std::ops::Range;
 use std::time::Duration;
 
+use app_ui_kit::render::elements::{emoji_ranges, split_highlights};
 use chrono::{Duration as Span, Local, Utc};
 use gpui_kit::assets::IconName;
+use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    Input, InputEvent, InputState, RangeDecorationCollection, TextDecorationCollection, Textarea,
+    TextareaMode, TextareaState,
+};
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use graph::{
     ARCHIVE, DELETED, Graph, MailAttachment, MailFolder, MailMessage, MailSummary, OutgoingMail,
-    Response, split_addresses,
+    Response, split_addresses, split_thread,
 };
+use teams_core::{Draft, MarkKind, SizeStep, TypingStyle};
 
 use crate::app_state::AppState;
 use crate::downloads::{self, PartFile};
 use crate::format;
 use crate::i18n::tr;
 use crate::notice::short_error;
+use crate::notify::NotificationCenter;
 use crate::runtime;
 use crate::theme;
+use crate::views::draft_style::draft_style;
 use crate::views::widgets::icon;
 
 const FOLDER_WIDTH: f32 = 220.;
-const LIST_WIDTH: f32 = 360.;
+const COLLAPSED_WIDTH: f32 = 48.;
+const LIST_WIDTH: f32 = 340.;
+const NOTIFIED_AT_ONCE: usize = 3;
 const POLL: Duration = Duration::from_secs(60);
 const FIRST_POLL: Duration = Duration::from_secs(5);
 const BODY_ROWS: (usize, usize) = (10, 30);
@@ -37,6 +49,12 @@ const BODY_ROWS: (usize, usize) = (10, 30);
 pub struct MailUnread(pub usize);
 
 impl Global for MailUnread {}
+
+/// A mail a notification asked to open.
+#[derive(Default)]
+pub struct MailFocus(pub Option<String>);
+
+impl Global for MailFocus {}
 
 pub fn mail_unread(cx: &App) -> usize {
     cx.try_global::<MailUnread>().map_or(0, |unread| unread.0)
@@ -56,7 +74,49 @@ struct Compose {
     cc: Entity<InputState>,
     subject: Entity<InputState>,
     body: Entity<TextareaState>,
+    draft: Draft,
+    decorations: (
+        TextDecorationCollection<TextareaMode>,
+        RangeDecorationCollection<TextareaMode>,
+    ),
+    /// Formats switched at the caret for what is typed next.
+    pending: Option<TypingStyle>,
     sending: bool,
+    _body_events: Subscription,
+}
+
+impl Compose {
+    fn refresh_style(&self, cx: &mut App) {
+        let style = draft_style(&self.draft, cx.theme().mono_font_family.clone());
+        self.decorations.0.set(style.text, cx);
+        self.decorations.1.set(style.ranges, cx);
+    }
+
+    fn format(
+        &mut self,
+        on_text: impl FnOnce(&mut Draft, Range<usize>),
+        on_caret: impl FnOnce(&mut TypingStyle, &[MarkKind]),
+        cx: &mut App,
+    ) {
+        let selection = self.body.read(cx).selected_range();
+        if selection.is_empty() {
+            let at = selection.start;
+            let mut pending = self
+                .pending
+                .take()
+                .filter(|pending| pending.at == at)
+                .unwrap_or(TypingStyle {
+                    at,
+                    ..TypingStyle::default()
+                });
+            on_caret(&mut pending, &self.draft.style_at(at));
+            self.pending = (!pending.is_empty()).then_some(pending);
+        } else {
+            on_text(&mut self.draft, selection);
+            self.draft.take_edits();
+            self.refresh_style(cx);
+        }
+    }
 }
 
 pub struct MailPage {
@@ -71,6 +131,11 @@ pub struct MailPage {
     message_generation: u64,
     compose: Option<Compose>,
     search: Option<Entity<InputState>>,
+    folders_hidden: bool,
+    notifications: Option<Entity<NotificationCenter>>,
+    /// Inbox mail already known; `None` until the first check, which notifies nothing.
+    // ponytail: lives with the page, so mail that arrives while the window sits in the tray is not announced.
+    seen: Option<HashSet<String>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -105,10 +170,17 @@ impl MailPage {
             message_generation: 0,
             compose: None,
             search: None,
+            folders_hidden: false,
+            notifications: None,
+            seen: None,
             _subscriptions: Vec::new(),
         };
         page.start_polling(cx);
         page
+    }
+
+    pub fn set_notifications(&mut self, center: Entity<NotificationCenter>) {
+        self.notifications = Some(center);
     }
 
     fn demo(&self, cx: &App) -> bool {
@@ -188,17 +260,63 @@ impl MailPage {
                 };
                 let inbox_before = this.folders.first().map(|folder| folder.unread);
                 this.folders = folders;
-                let inbox = this.folders.first().map(|folder| folder.id.clone());
-                if this.folder.is_some()
-                    && this.folder == inbox
-                    && inbox_before != this.folders.first().map(|folder| folder.unread)
+                if this.seen.is_none()
+                    || inbox_before != this.folders.first().map(|folder| folder.unread)
                 {
-                    this.load_list(true, cx);
+                    this.check_inbox(cx);
                 }
                 this.set_unread(cx);
                 cx.notify();
             },
         );
+    }
+
+    /// Announces unread inbox mail not seen before and refreshes the list when it shows the inbox.
+    fn check_inbox(&mut self, cx: &mut Context<Self>) {
+        let Some(inbox) = self.folders.first().map(|folder| folder.id.clone()) else {
+            return;
+        };
+        let generation = self.list_generation;
+        let query = inbox.clone();
+        self.call(
+            cx,
+            move |graph| async move { graph.folder_mail(&query).await },
+            move |this, outcome, cx| {
+                let Ok(mail) = outcome else {
+                    return;
+                };
+                let fresh: Vec<&MailSummary> = match &this.seen {
+                    Some(seen) => mail
+                        .iter()
+                        .filter(|mail| !mail.is_read && !seen.contains(&mail.id))
+                        .take(NOTIFIED_AT_ONCE)
+                        .collect(),
+                    None => Vec::new(),
+                };
+                if let Some(center) = this.notifications.clone() {
+                    for mail in fresh {
+                        let text = if mail.preview.is_empty() {
+                            mail.subject.clone()
+                        } else {
+                            format!("{} – {}", mail.subject, mail.preview)
+                        };
+                        center.update(cx, |center, cx| {
+                            center.present_mail(&mail.id, &sender(mail), &text, cx)
+                        });
+                    }
+                }
+                this.seen = Some(mail.iter().map(|mail| mail.id.clone()).collect());
+                if this.folder.as_ref() == Some(&inbox) && generation == this.list_generation {
+                    this.list = Load::Ready(mail);
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        self.refresh_folders(cx);
+        self.load_list(true, cx);
     }
 
     fn set_unread(&mut self, cx: &mut Context<Self>) {
@@ -220,6 +338,18 @@ impl MailPage {
             });
             self._subscriptions.push(subscription);
             self.search = Some(search);
+        }
+        if let Some(message_id) = cx
+            .try_global::<MailFocus>()
+            .and_then(|focus| focus.0.clone())
+        {
+            cx.set_global(MailFocus(None));
+            if let Some(inbox) = self.folders.first().map(|folder| folder.id.clone())
+                && self.folder.as_ref() != Some(&inbox)
+            {
+                self.select_folder(inbox, cx);
+            }
+            self.open_message(message_id, cx);
         }
         if self.folder.is_none() && matches!(self.list, Load::Idle) {
             if self.demo(cx) {
@@ -363,7 +493,7 @@ impl MailPage {
         self.message_generation += 1;
         let generation = self.message_generation;
         self.message = Load::Loading;
-        let unread = self.summary(&message_id).is_some_and(|mail| !mail.is_read);
+        let unread = self.summary(&message_id).is_none_or(|mail| !mail.is_read);
         self.set_read_locally(&message_id, true);
         self.set_unread(cx);
         cx.notify();
@@ -486,17 +616,29 @@ impl MailPage {
         let field = |placeholder: String, window: &mut Window, cx: &mut Context<Self>| {
             cx.new(|cx| InputState::new(window, cx).placeholder(placeholder))
         };
+        let body = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .auto_grow(BODY_ROWS.0, BODY_ROWS.1)
+                .placeholder(tr("mail.body"))
+        });
+        let decorations = body.update(cx, |state, cx| {
+            (
+                state.create_decorations_collection(Vec::new(), cx),
+                state.create_range_decorations_collection(Vec::new(), cx),
+            )
+        });
+        let body_events = cx.subscribe_in(&body, window, Self::on_body_event);
         let compose = Compose {
             to: field(tr("mail.to"), window, cx),
             cc: field(tr("mail.cc"), window, cx),
             subject: field(tr("mail.subject"), window, cx),
-            body: cx.new(|cx| {
-                TextareaState::new(window, cx)
-                    .auto_grow(BODY_ROWS.0, BODY_ROWS.1)
-                    .placeholder(tr("mail.body"))
-            }),
+            body,
+            draft: Draft::default(),
+            decorations,
+            pending: None,
             response,
             sending: false,
+            _body_events: body_events,
         };
         let focus = match compose.response {
             Some((Response::Reply | Response::ReplyAll, _)) => None,
@@ -510,6 +652,57 @@ impl MailPage {
         cx.notify();
     }
 
+    /// Keeps the draft, which carries the formatting, in step with what is typed.
+    fn on_body_event(
+        &mut self,
+        input: &Entity<TextareaState>,
+        event: &InputEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(compose) = self
+            .compose
+            .as_mut()
+            .filter(|compose| matches!(event, InputEvent::Change) && &compose.body == input)
+        else {
+            return;
+        };
+        let state = input.read(cx);
+        let (value, cursor) = (state.value().to_string(), state.cursor());
+        if value == compose.draft.text() {
+            return;
+        }
+        let typing = compose.pending.take();
+        let cursor = compose.draft.apply_edit(&value, cursor, typing.as_ref());
+        let edits = compose.draft.take_edits();
+        if !edits.is_empty() {
+            input.update(cx, |state, cx| {
+                state.apply_edits(&edits, window, cx);
+                state.set_selected_range(cursor..cursor, cx);
+            });
+            let value = input.read(cx).value().to_string();
+            if value != compose.draft.text() {
+                compose.draft.apply_edit(&value, cursor, None);
+                compose.draft.take_edits();
+            }
+        }
+        compose.refresh_style(cx);
+    }
+
+    fn format(
+        &mut self,
+        on_text: impl FnOnce(&mut Draft, Range<usize>),
+        on_caret: impl FnOnce(&mut TypingStyle, &[MarkKind]),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(compose) = self.compose.as_mut() {
+            compose.format(on_text, on_caret, cx);
+            compose.body.update(cx, |input, cx| input.focus(window, cx));
+            cx.notify();
+        }
+    }
+
     fn send(&mut self, cx: &mut Context<Self>) {
         let Some(compose) = self.compose.as_mut().filter(|compose| !compose.sending) else {
             return;
@@ -517,7 +710,7 @@ impl MailPage {
         let to = split_addresses(&compose.to.read(cx).value());
         let cc = split_addresses(&compose.cc.read(cx).value());
         let subject = compose.subject.read(cx).value().to_string();
-        let body = compose.body.read(cx).value().to_string();
+        let body = compose.draft.trimmed().to_html();
         let response = compose.response.clone();
         let needs_recipient = !matches!(response, Some((Response::Reply | Response::ReplyAll, _)));
         if needs_recipient && to.is_empty() {
@@ -566,24 +759,35 @@ impl MailPage {
         );
     }
 
-    fn render_folders(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn new_mail_button(&self, cx: &mut Context<Self>) -> Button {
+        Button::new("mail-new")
+            .primary()
+            .icon(IconName::Pencil)
+            .on_click(cx.listener(|this, _, window, cx| this.start_compose(None, window, cx)))
+    }
+
+    fn render_folders(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.folders_hidden {
+            return v_flex()
+                .w(px(COLLAPSED_WIDTH))
+                .flex_none()
+                .h_full()
+                .py(px(10.))
+                .items_center()
+                .border_r_1()
+                .border_color(theme::border())
+                .child(self.new_mail_button(cx).tooltip(tr("mail.new")))
+                .into_any_element();
+        }
         let mut column = v_flex()
             .w(px(FOLDER_WIDTH))
             .flex_none()
             .h_full()
             .p(px(10.))
-            .gap(px(4.))
+            .gap(px(2.))
             .border_r_1()
             .border_color(theme::border())
-            .child(
-                Button::new("mail-new")
-                    .primary()
-                    .icon(IconName::Plus)
-                    .label(tr("mail.new"))
-                    .on_click(
-                        cx.listener(|this, _, window, cx| this.start_compose(None, window, cx)),
-                    ),
-            )
+            .child(self.new_mail_button(cx).label(tr("mail.new")))
             .children(self.search.as_ref().map(|search| {
                 div()
                     .my(px(6.))
@@ -602,7 +806,7 @@ impl MailPage {
                 h_flex()
                     .id(SharedString::from(format!("mail-folder-{}", folder.id)))
                     .px(px(10.))
-                    .py(px(6.))
+                    .py(px(5.))
                     .rounded(px(6.))
                     .cursor_pointer()
                     .text_size(px(13.))
@@ -630,7 +834,7 @@ impl MailPage {
                     }),
             );
         }
-        column
+        column.into_any_element()
     }
 
     fn render_list(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -661,13 +865,42 @@ impl MailPage {
             .border_r_1()
             .border_color(theme::border())
             .child(
-                div()
-                    .px(px(16.))
-                    .py(px(12.))
-                    .text_size(px(15.))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme::text())
-                    .child(title),
+                h_flex()
+                    .px(px(8.))
+                    .py(px(6.))
+                    .gap(px(4.))
+                    .items_center()
+                    .border_b_1()
+                    .border_color(theme::border())
+                    .child(
+                        Button::new("mail-folders")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::PanelLeft)
+                            .tooltip(tr("mail.folders"))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.folders_hidden = !this.folders_hidden;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(14.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::text())
+                            .child(title),
+                    )
+                    .child(
+                        Button::new("mail-refresh")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::RefreshCw)
+                            .tooltip(tr("mail.refresh"))
+                            .on_click(cx.listener(|this, _, _, cx| this.refresh(cx))),
+                    ),
             )
             .child(div().flex_1().min_h_0().child(body))
     }
@@ -683,9 +916,8 @@ impl MailPage {
         v_flex()
             .id(SharedString::from(format!("mail-row-{}", summary.id)))
             .w_full()
-            .px(px(16.))
-            .py(px(8.))
-            .gap(px(2.))
+            .px(px(14.))
+            .py(px(5.))
             .cursor_pointer()
             .border_l_2()
             .border_color(if summary.is_read {
@@ -721,23 +953,30 @@ impl MailPage {
                     ),
             )
             .child(
-                div()
-                    .truncate()
-                    .text_size(px(12.5))
-                    .font_weight(weight)
-                    .text_color(if summary.is_read {
-                        theme::text_muted()
-                    } else {
-                        theme::accent_text()
-                    })
-                    .child(summary.subject.clone()),
-            )
-            .child(
-                div()
-                    .truncate()
+                h_flex()
+                    .gap(px(6.))
                     .text_size(px(12.))
-                    .text_color(theme::text_faint())
-                    .child(summary.preview.clone()),
+                    .child(
+                        div()
+                            .flex_none()
+                            .max_w(px(LIST_WIDTH * 0.6))
+                            .truncate()
+                            .font_weight(weight)
+                            .text_color(if summary.is_read {
+                                theme::text_muted()
+                            } else {
+                                theme::accent_text()
+                            })
+                            .child(summary.subject.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme::text_faint())
+                            .child(summary.preview.clone()),
+                    ),
             )
             .into_any_element()
     }
@@ -751,8 +990,12 @@ impl MailPage {
         };
         let summary = message.summary.clone();
         let id = summary.id.clone();
-        let action = |key: &'static str, label: String, glyph: IconName| {
-            Button::new(key).ghost().compact().icon(glyph).label(label)
+        let action = |key: &'static str, tooltip: String, glyph: IconName| {
+            Button::new(key)
+                .ghost()
+                .compact()
+                .icon(glyph)
+                .tooltip(tooltip)
         };
         let respond = |kind: Response, summary: MailSummary| {
             cx.listener(move |this: &mut Self, _, window, cx| {
@@ -760,14 +1003,14 @@ impl MailPage {
             })
         };
         let actions = h_flex()
-            .flex_wrap()
-            .gap(px(4.))
+            .flex_none()
+            .gap(px(2.))
             .child(
                 action("mail-reply", tr("mail.reply"), IconName::Reply)
                     .on_click(respond(Response::Reply, summary.clone())),
             )
             .child(
-                action("mail-reply-all", tr("mail.reply_all"), IconName::Reply)
+                action("mail-reply-all", tr("mail.reply_all"), IconName::Users)
                     .on_click(respond(Response::ReplyAll, summary.clone())),
             )
             .child(
@@ -796,103 +1039,142 @@ impl MailPage {
                     }),
                 ),
             );
-        let recipients = |label: String, list: &[String]| {
-            (!list.is_empty()).then(|| {
-                div()
-                    .text_size(px(12.))
-                    .text_color(theme::text_muted())
-                    .child(format!("{label}: {}", list.join(", ")))
-            })
-        };
+        let recipients = [(tr("mail.to"), &message.to), (tr("mail.cc"), &message.cc)]
+            .into_iter()
+            .filter(|(_, list)| !list.is_empty())
+            .map(|(label, list)| format!("{label}: {}", list.join(", ")))
+            .collect::<Vec<_>>()
+            .join("   ");
         let visible: Vec<MailAttachment> = attachments
             .iter()
             .filter(|attachment| !attachment.inline)
             .cloned()
             .collect();
-        v_flex()
-            .size_full()
+        let mut parts = split_thread(&message.body).into_iter();
+        let newest = parts.next().unwrap_or_default();
+        let header = v_flex()
+            .flex_none()
+            .px(px(20.))
+            .pt(px(10.))
+            .pb(px(8.))
+            .gap(px(2.))
+            .border_b_1()
+            .border_color(theme::border())
             .child(
-                v_flex()
-                    .flex_none()
-                    .px(px(24.))
-                    .pt(px(16.))
-                    .pb(px(10.))
-                    .gap(px(4.))
-                    .border_b_1()
-                    .border_color(theme::border())
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
                     .child(
                         div()
-                            .text_size(px(17.))
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(15.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme::text())
                             .child(summary.subject.clone()),
                     )
-                    .child(
-                        h_flex()
-                            .gap(px(8.))
-                            .text_size(px(13.))
-                            .child(
-                                div()
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .text_color(theme::text())
-                                    .child(sender(&summary)),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme::text_faint())
-                                    .child(summary.from_address.clone()),
-                            )
-                            .child(div().flex_1())
-                            .child(
-                                div()
-                                    .text_size(px(12.))
-                                    .text_color(theme::text_faint())
-                                    .child(time_label(&summary)),
-                            ),
-                    )
-                    .children(recipients(tr("mail.to"), &message.to))
-                    .children(recipients(tr("mail.cc"), &message.cc))
-                    .child(actions)
-                    .when(!visible.is_empty(), |header| {
-                        header.child(h_flex().flex_wrap().gap(px(6.)).children(
-                            visible.into_iter().enumerate().map(|(index, attachment)| {
-                                let message_id = id.clone();
-                                Button::new(ElementId::NamedInteger(
-                                    "mail-attachment".into(),
-                                    index as u64,
-                                ))
-                                .outline()
-                                .compact()
-                                .icon(IconName::Paperclip)
-                                .label(attachment.name.clone())
-                                .on_click(cx.listener(
-                                    move |this, _, _, cx| {
-                                        this.open_attachment(
-                                            message_id.clone(),
-                                            attachment.clone(),
-                                            cx,
-                                        )
-                                    },
-                                ))
-                            }),
-                        ))
-                    }),
+                    .child(actions),
             )
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .text_size(px(12.5))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme::text())
+                            .child(sender(&summary)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(theme::text_faint())
+                            .child(summary.from_address.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.5))
+                            .text_color(theme::text_faint())
+                            .child(time_label(&summary)),
+                    ),
+            )
+            .when(!recipients.is_empty(), |header| {
+                header.child(
+                    div()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(theme::text_muted())
+                        .child(recipients),
+                )
+            })
+            .when(!visible.is_empty(), |header| {
+                header.child(h_flex().pt(px(4.)).flex_wrap().gap(px(6.)).children(
+                    visible.into_iter().enumerate().map(|(index, attachment)| {
+                        let message_id = id.clone();
+                        Button::new(ElementId::NamedInteger(
+                            "mail-attachment".into(),
+                            index as u64,
+                        ))
+                        .outline()
+                        .compact()
+                        .icon(IconName::Paperclip)
+                        .label(attachment.name.clone())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.open_attachment(message_id.clone(), attachment.clone(), cx)
+                        }))
+                    }),
+                ))
+            });
+        let quoted = parts.map(|part| {
+            v_flex()
+                .mt(px(10.))
+                .px(px(12.))
+                .py(px(8.))
+                .gap(px(4.))
+                .rounded(px(8.))
+                .border_l_2()
+                .border_color(theme::border_strong())
+                .bg(theme::surface_raised())
+                .child(
+                    h_flex()
+                        .gap(px(8.))
+                        .text_size(px(12.))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme::text_soft())
+                                .child(part.from),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_color(theme::text_faint())
+                                .child(part.sent),
+                        ),
+                )
+                .child(mail_text(part.body, theme::text_muted()))
+        });
+        v_flex()
+            .size_full()
+            .child(header)
             .child(
                 v_flex()
                     .id("mail-body")
                     .flex_1()
                     .min_h_0()
-                    .px(px(24.))
-                    .py(px(14.))
-                    .text_size(px(13.5))
-                    .text_color(theme::text())
-                    .children(
-                        message
-                            .body
-                            .lines()
-                            .map(|line| div().min_h(px(19.)).child(line.to_owned())),
-                    )
+                    .px(px(20.))
+                    .py(px(12.))
+                    .text_size(px(13.))
+                    .child(mail_text(newest.body, theme::text()))
+                    .children(quoted)
                     .overflow_y_scrollbar(),
             )
             .into_any_element()
@@ -984,12 +1266,12 @@ impl MailPage {
                         .child(tr("mail.quoted_below")),
                 )
             })
+            .child(self.render_format_bar(cx))
             .child(
                 div()
                     .id("mail-compose-body")
                     .flex_1()
                     .min_h_0()
-                    .mt(px(6.))
                     .p(px(8.))
                     .rounded(px(8.))
                     .bg(theme::surface_raised())
@@ -1002,6 +1284,108 @@ impl MailPage {
             )
             .into_any_element()
     }
+
+    fn render_format_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let button = |key: &'static str, tooltip: String, label: Div| {
+            Button::new(key)
+                .ghost()
+                .compact()
+                .tooltip(tooltip)
+                .child(label.text_color(theme::text()))
+        };
+        let mark = |kind: MarkKind| {
+            cx.listener(move |this: &mut Self, _, window, cx| {
+                let (text_kind, caret_kind) = (kind.clone(), kind.clone());
+                this.format(
+                    move |draft, range| draft.toggle(range, text_kind),
+                    move |typing, active| typing.toggle(caret_kind, active),
+                    window,
+                    cx,
+                )
+            })
+        };
+        let size = |step: Option<SizeStep>| {
+            cx.listener(move |this: &mut Self, _, window, cx| {
+                this.format(
+                    move |draft, range| draft.set_size(range, step),
+                    move |typing, active| typing.set_size(step, active),
+                    window,
+                    cx,
+                )
+            })
+        };
+        h_flex()
+            .mt(px(6.))
+            .gap(px(2.))
+            .child(
+                button(
+                    "mail-bold",
+                    tr("mail.bold"),
+                    div()
+                        .text_size(px(14.))
+                        .font_weight(FontWeight::BOLD)
+                        .child("B"),
+                )
+                .on_click(mark(MarkKind::Bold)),
+            )
+            .child(
+                button(
+                    "mail-italic",
+                    tr("mail.italic"),
+                    div().text_size(px(14.)).italic().child("I"),
+                )
+                .on_click(mark(MarkKind::Italic)),
+            )
+            .child(
+                button(
+                    "mail-underline",
+                    tr("mail.underline"),
+                    div().text_size(px(14.)).underline().child("U"),
+                )
+                .on_click(mark(MarkKind::Underline)),
+            )
+            .child(div().w(px(1.)).h(px(18.)).mx(px(4.)).bg(theme::border()))
+            .child(
+                button(
+                    "mail-smaller",
+                    tr("mail.smaller"),
+                    div().child("A").text_size(px(11.)),
+                )
+                .on_click(size(Some(SizeStep::Small))),
+            )
+            .child(
+                button(
+                    "mail-normal",
+                    tr("mail.normal_size"),
+                    div().text_size(px(14.)).child("A"),
+                )
+                .on_click(size(None)),
+            )
+            .child(
+                button(
+                    "mail-larger",
+                    tr("mail.larger"),
+                    div().child("A").text_size(px(18.)),
+                )
+                .on_click(size(Some(SizeStep::Large))),
+            )
+    }
+}
+
+/// Mail text with color emoji: the font fallback would draw some of them as outlines.
+fn mail_text(text: String, color: Hsla) -> impl IntoElement {
+    let emoji = emoji_ranges(&text);
+    let family = SharedString::from(theme::EMOJI_FONT_FAMILY);
+    let highlights = split_highlights(Vec::new(), &emoji, text.len());
+    let overrides: Vec<_> = emoji
+        .into_iter()
+        .map(|range| (range, family.clone()))
+        .collect();
+    div().w_full().text_color(color).child(
+        StyledText::new(text)
+            .with_highlights(highlights)
+            .with_font_family_overrides(overrides),
+    )
 }
 
 fn centered(text: String) -> AnyElement {
@@ -1128,10 +1512,15 @@ mod demo {
     }
 
     pub fn message(summary: MailSummary) -> MailMessage {
-        let body = format!(
+        let mut body = format!(
             "Hi,\n\n{}\n\nBest regards\n{}",
             summary.preview, summary.from_name
         );
+        if summary.subject.starts_with("Re:") {
+            body.push_str(
+                "\n\n________________________________\nFrom: Demo User <demo.user@demo.example>\nSent: Monday 09:12\nSubject: Rollout plan\n\nHere is the rollout plan for next week. 🙂\n\n1. Pilot group on Monday\n2. Everyone on Wednesday",
+            );
+        }
         MailMessage {
             summary,
             to: vec!["demo.user@demo.example".to_owned()],

@@ -264,6 +264,7 @@ mod tests {
             status_change: false,
             urgent,
             org: None,
+            mail: false,
         }
     }
 
