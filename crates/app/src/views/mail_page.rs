@@ -40,6 +40,8 @@ const FOLDER_WIDTH: f32 = 220.;
 const COLLAPSED_WIDTH: f32 = 48.;
 const LIST_WIDTH: f32 = 340.;
 const NOTIFIED_AT_ONCE: usize = 3;
+const ROW_HEIGHT: f32 = 50.;
+const ROW_LINE: f32 = 19.;
 const POLL: Duration = Duration::from_secs(60);
 const FIRST_POLL: Duration = Duration::from_secs(5);
 const BODY_ROWS: (usize, usize) = (10, 30);
@@ -916,8 +918,11 @@ impl MailPage {
         v_flex()
             .id(SharedString::from(format!("mail-row-{}", summary.id)))
             .w_full()
+            .flex_none()
+            .h(px(ROW_HEIGHT))
+            .overflow_hidden()
+            .justify_center()
             .px(px(14.))
-            .py(px(5.))
             .cursor_pointer()
             .border_l_2()
             .border_color(if summary.is_read {
@@ -930,8 +935,11 @@ impl MailPage {
             .on_click(cx.listener(move |this, _, _, cx| this.open_message(id.clone(), cx)))
             .child(
                 h_flex()
+                    .h(px(ROW_LINE))
+                    .overflow_hidden()
                     .gap(px(8.))
                     .text_size(px(13.))
+                    .line_height(px(ROW_LINE))
                     .child(
                         div()
                             .flex_1()
@@ -939,7 +947,7 @@ impl MailPage {
                             .truncate()
                             .font_weight(weight)
                             .text_color(theme::text())
-                            .child(sender(summary)),
+                            .child(one_line(&sender(summary))),
                     )
                     .when(summary.has_attachments, |row| {
                         row.child(icon(IconName::Paperclip, 12., theme::text_faint()))
@@ -954,8 +962,11 @@ impl MailPage {
             )
             .child(
                 h_flex()
+                    .h(px(ROW_LINE))
+                    .overflow_hidden()
                     .gap(px(6.))
                     .text_size(px(12.))
+                    .line_height(px(ROW_LINE))
                     .child(
                         div()
                             .flex_none()
@@ -967,7 +978,7 @@ impl MailPage {
                             } else {
                                 theme::accent_text()
                             })
-                            .child(summary.subject.clone()),
+                            .child(one_line(&summary.subject)),
                     )
                     .child(
                         div()
@@ -975,7 +986,7 @@ impl MailPage {
                             .min_w_0()
                             .truncate()
                             .text_color(theme::text_faint())
-                            .child(summary.preview.clone()),
+                            .child(one_line(&summary.preview)),
                     ),
             )
             .into_any_element()
@@ -1370,6 +1381,11 @@ impl MailPage {
                 .on_click(size(Some(SizeStep::Large))),
             )
     }
+}
+
+/// A preview with line breaks would wrap even when truncated.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Mail text with color emoji: the font fallback would draw some of them as outlines.
