@@ -195,6 +195,10 @@ pub fn drive_item(drive_id: &str, item_id: &str) -> String {
     )
 }
 
+pub fn drive_item_pdf(drive_id: &str, item_id: &str) -> String {
+    format!("{}/content?format=pdf", drive_item(drive_id, item_id))
+}
+
 pub fn recent_drive_items(top: usize) -> String {
     format!("{GRAPH}/v1.0/me/drive/recent?$top={top}")
 }

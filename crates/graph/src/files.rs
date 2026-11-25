@@ -406,6 +406,18 @@ impl Graph {
         Ok(decode_binary(download_url, answer)?.bytes)
     }
 
+    /// An Office document converted to PDF by SharePoint.
+    pub async fn drive_item_pdf(&self, drive_id: &str, item_id: &str) -> Result<Vec<u8>> {
+        let url = urls::drive_item_pdf(drive_id, item_id);
+        let request = Request::binary_get(&url);
+        let answer = self
+            .session()
+            .batch(std::slice::from_ref(&request), &Scope::graph(FILES_SCOPE))
+            .await?
+            .remove(0);
+        Ok(decode_binary(&url, answer)?.bytes)
+    }
+
     pub async fn delete_drive_item(&self, drive_id: &str, item_id: &str) -> Result<()> {
         self.session()
             .request(

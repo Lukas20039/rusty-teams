@@ -292,6 +292,10 @@ pub trait Remote {
         Err(Error::Unsupported("resolving a drive item"))
     }
 
+    async fn drive_item_pdf(&self, _drive_id: &str, _item_id: &str) -> Result<Vec<u8>> {
+        Err(Error::Unsupported("PDF conversion"))
+    }
+
     async fn download_range(
         &self,
         _download_url: &str,
@@ -1170,6 +1174,10 @@ impl Remote for Graph {
 
     async fn resolve_drive_item(&self, drive_id: &str, item_id: &str) -> Result<SharedFile> {
         Ok(Graph::resolve_drive_item(self, drive_id, item_id).await?)
+    }
+
+    async fn drive_item_pdf(&self, drive_id: &str, item_id: &str) -> Result<Vec<u8>> {
+        Ok(Graph::drive_item_pdf(self, drive_id, item_id).await?)
     }
 
     async fn download_range(

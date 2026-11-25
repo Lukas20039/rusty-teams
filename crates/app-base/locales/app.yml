@@ -2135,3 +2135,21 @@ onedrive:
   uploading:
     en: Uploading
     de: Lädt hoch
+  back:
+    en: Back
+    de: Zurück
+  download:
+    en: Download
+    de: Herunterladen
+  preview_loading:
+    en: Loading preview …
+    de: Vorschau wird geladen …
+  preview_failed:
+    en: No preview
+    de: Keine Vorschau
+  preview_demo:
+    en: previews need a signed-in account
+    de: die Vorschau braucht ein angemeldetes Konto
+  preview_more_pages:
+    en: The preview shows the first 40 pages, open the document for all of them
+    de: Die Vorschau zeigt die ersten 40 Seiten, für alle das Dokument öffnen

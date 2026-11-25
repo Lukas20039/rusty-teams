@@ -65,6 +65,11 @@ impl<R: Remote> SyncEngine<R> {
         self.remote.drive_root(site_id).await
     }
 
+    /// An Office document in a library, converted to PDF for previewing.
+    pub async fn library_file_as_pdf(&self, drive_id: &str, item_id: &str) -> Result<Vec<u8>> {
+        self.remote.drive_item_pdf(drive_id, item_id).await
+    }
+
     pub async fn team_library_root(&self, team_id: &str) -> Result<DriveFolder> {
         self.remote.team_drive_root(team_id).await
     }

@@ -2,10 +2,13 @@
 
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
-use gpui_kit::component::h_flex;
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, InputState};
+use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use teams_core::{CloudFile, DriveEntry, DriveFolder, QuickSite};
@@ -19,6 +22,10 @@ use crate::notice::short_error;
 use crate::runtime;
 use crate::theme;
 use crate::views::attachment_tray::{display_name, read_attachment};
+use crate::views::file_preview::{
+    self, Decoded, MAX_PREVIEW_BYTES, PreviewKind, pages_view, preview_kind, render_image,
+    text_view,
+};
 use crate::views::shared_tab::{LibraryView, Listing, SharedCommand, SharedRun, render_library};
 
 const DEMO_DRIVE: &str = "onedrive";
@@ -116,6 +123,18 @@ pub fn root_web_url(entries: &[DriveEntry]) -> String {
 
 type Loaded = (Option<Crumb>, Vec<DriveEntry>);
 
+enum PreviewBody {
+    Loading,
+    Failed(String),
+    Pages(Vec<Arc<RenderImage>>, usize),
+    Text(String),
+}
+
+struct Preview {
+    entry: DriveEntry,
+    body: PreviewBody,
+}
+
 pub struct OneDrivePage {
     app: Entity<AppState>,
     section: Section,
@@ -128,6 +147,8 @@ pub struct OneDrivePage {
     new_folder_open: bool,
     uploads_running: usize,
     downloading: Option<String>,
+    preview: Option<Preview>,
+    preview_generation: u64,
     demo: DemoLibrary,
     _subscriptions: Vec<Subscription>,
 }
@@ -146,6 +167,8 @@ impl OneDrivePage {
             new_folder_open: false,
             uploads_running: 0,
             downloading: None,
+            preview: None,
+            preview_generation: 0,
             demo: DemoLibrary::default(),
             _subscriptions: Vec::new(),
         }
@@ -179,7 +202,7 @@ impl OneDrivePage {
                     return;
                 };
                 if !entry.is_folder() {
-                    cx.open_url(&entry.web_url);
+                    self.open_file(entry, cx);
                     return;
                 }
                 if is_library(&entry) {
@@ -622,6 +645,188 @@ impl OneDrivePage {
         cx.notify();
     }
 
+    fn open_file(&mut self, entry: DriveEntry, cx: &mut Context<Self>) {
+        match preview_kind(&entry.name) {
+            Some(PreviewKind::Media) => self.download(entry, cx),
+            Some(kind) if !entry.drive_id.is_empty() && entry.size <= MAX_PREVIEW_BYTES => {
+                self.show_preview(entry, kind, cx)
+            }
+            _ => cx.open_url(&entry.web_url),
+        }
+    }
+
+    fn show_preview(&mut self, entry: DriveEntry, kind: PreviewKind, cx: &mut Context<Self>) {
+        self.preview_generation += 1;
+        let generation = self.preview_generation;
+        let state = self.app.read(cx);
+        let (demo, engine) = (state.mode.demo, state.engine.clone());
+        let body = match (demo, engine) {
+            (true, _) => PreviewBody::Failed(tr("onedrive.preview_demo")),
+            (false, None) => PreviewBody::Failed(tr("onedrive.not_connected")),
+            (false, Some(engine)) => {
+                let file = library_file(&entry, self.listed_at, Instant::now());
+                let (drive_id, item_id) = (entry.drive_id.clone(), entry.id.clone());
+                let fetched = runtime::spawn(async move {
+                    if kind == PreviewKind::Office {
+                        return engine.library_file_as_pdf(&drive_id, &item_id).await;
+                    }
+                    let mut bytes = Vec::new();
+                    engine
+                        .download_library_file(
+                            &file,
+                            |chunk| {
+                                bytes.extend_from_slice(chunk);
+                                Ok(())
+                            },
+                            |_| {},
+                        )
+                        .await?;
+                    Ok(bytes)
+                });
+                cx.spawn(async move |this, cx| {
+                    let decoded = match fetched.await {
+                        Ok(Ok(bytes)) => {
+                            cx.background_executor()
+                                .spawn(async move { file_preview::decode(kind, bytes) })
+                                .await
+                        }
+                        Ok(Err(error)) => Err(short_error(&error)),
+                        Err(error) => Err(short_error(&error)),
+                    };
+                    this.update(cx, |this, cx| this.finish_preview(generation, decoded, cx))
+                        .ok();
+                })
+                .detach();
+                PreviewBody::Loading
+            }
+        };
+        self.preview = Some(Preview { entry, body });
+        cx.notify();
+    }
+
+    fn finish_preview(
+        &mut self,
+        generation: u64,
+        decoded: Result<Decoded, String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(preview) = self
+            .preview
+            .as_mut()
+            .filter(|_| generation == self.preview_generation)
+        else {
+            return;
+        };
+        preview.body = match decoded {
+            Ok(Decoded::Pages(pages, total)) => {
+                PreviewBody::Pages(pages.into_iter().map(render_image).collect(), total)
+            }
+            Ok(Decoded::Text(text)) => PreviewBody::Text(text),
+            Err(reason) => PreviewBody::Failed(reason),
+        };
+        cx.notify();
+    }
+
+    fn close_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Preview {
+            body: PreviewBody::Pages(pages, _),
+            ..
+        }) = self.preview.take()
+        {
+            for page in pages {
+                window.drop_image(page).ok();
+            }
+        }
+        self.preview_generation += 1;
+        cx.notify();
+    }
+
+    fn render_preview(&self, preview: &Preview, cx: &mut Context<Self>) -> AnyElement {
+        let entry = preview.entry.clone();
+        let (download_entry, web_url) = (entry.clone(), entry.web_url.clone());
+        let header = h_flex()
+            .w_full()
+            .flex_none()
+            .px(px(12.))
+            .py(px(8.))
+            .gap(px(8.))
+            .items_center()
+            .border_b_1()
+            .border_color(theme::border())
+            .child(
+                Button::new("onedrive-preview-back")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::ArrowLeft)
+                    .label(tr("onedrive.back"))
+                    .on_click(cx.listener(|this, _, window, cx| this.close_preview(window, cx))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme::text())
+                    .child(entry.name.clone()),
+            )
+            .child(
+                Button::new("onedrive-preview-download")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Download)
+                    .label(tr("onedrive.download"))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.download(download_entry.clone(), cx)
+                        }),
+                    ),
+            )
+            .child(
+                Button::new("onedrive-preview-browser")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::ExternalLink)
+                    .label(tr("onedrive.open_web"))
+                    .on_click(move |_, _, cx| cx.open_url(&web_url)),
+            );
+        let note = |text: String| {
+            div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.))
+                .text_color(theme::text_muted())
+                .child(text)
+                .into_any_element()
+        };
+        let body = match &preview.body {
+            PreviewBody::Loading => note(tr("onedrive.preview_loading")),
+            PreviewBody::Failed(reason) => {
+                note(format!("{}: {reason}", tr("onedrive.preview_failed")))
+            }
+            PreviewBody::Pages(pages, total) => pages_view(
+                pages,
+                *total,
+                format!("{} ({total})", tr("onedrive.preview_more_pages")),
+            ),
+            PreviewBody::Text(text) => text_view(text, cx),
+        };
+        v_flex()
+            .size_full()
+            .child(header)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .bg(theme::surface_raised())
+                    .child(body),
+            )
+            .into_any_element()
+    }
+
     fn section_switch(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut switch = h_flex()
             .flex_none()
@@ -679,6 +884,13 @@ impl Render for OneDrivePage {
         };
         let web_label = format!("{} \u{2197}", tr("onedrive.open_web"));
         let empty = tr("onedrive.empty");
+        if let Some(preview) = &self.preview {
+            return div()
+                .debug_selector(|| "shell/onedrive".into())
+                .size_full()
+                .bg(theme::surface())
+                .child(self.render_preview(preview, cx));
+        }
         div()
             .debug_selector(|| "shell/onedrive".into())
             .size_full()

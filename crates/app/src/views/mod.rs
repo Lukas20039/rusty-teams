@@ -53,6 +53,7 @@ pub mod create_channel_dialog;
 pub mod customize_reactions;
 pub mod dialog_overlay;
 pub mod emoji_popup;
+pub mod file_preview;
 pub mod find_panel;
 pub mod format_toolbar;
 pub mod forward_dialog;
