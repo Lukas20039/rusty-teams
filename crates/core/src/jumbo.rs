@@ -145,6 +145,20 @@ fn unicode_emoji(text: &str) -> Option<Vec<JumboEmoji>> {
         .collect()
 }
 
+/// Byte ranges of the emoji graphemes in `text` that default to emoji presentation.
+/// A lone ©, ™ or arrow stays text, as in the web client.
+pub fn emoji_grapheme_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    text.grapheme_indices(true)
+        .filter(|(_, grapheme)| {
+            is_emoji_grapheme(grapheme)
+                && grapheme
+                    .chars()
+                    .any(|character| character >= '\u{1f000}' || character == '\u{fe0f}')
+        })
+        .map(|(start, grapheme)| start..start + grapheme.len())
+        .collect()
+}
+
 pub(crate) fn is_emoji_grapheme(grapheme: &str) -> bool {
     let mut characters = grapheme.chars();
     characters.next().is_some_and(is_pictographic)
@@ -186,6 +200,16 @@ fn is_pictographic(character: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emoji_ranges_cover_emoji_and_leave_text_symbols() {
+        let text = "a 😅 b 🙂 ❤️ 👍🏼 © → ❤";
+        let found: Vec<&str> = emoji_grapheme_ranges(text)
+            .into_iter()
+            .map(|range| &text[range])
+            .collect();
+        assert_eq!(found, ["😅", "🙂", "❤️", "👍🏼"]);
+    }
 
     #[test]
     fn repeated_skin_tones_from_graph_are_dropped() {
