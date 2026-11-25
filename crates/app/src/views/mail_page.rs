@@ -35,9 +35,10 @@ use crate::i18n::tr;
 use crate::notice::short_error;
 use crate::notify::NotificationCenter;
 use crate::runtime;
-use crate::theme;
+use crate::theme::{self, ElevatedSurface as _};
 use crate::views::draft_style::draft_style;
 use crate::views::widgets::icon;
+use gpui_kit::base::POPUP_PRIORITY;
 
 const FOLDER_WIDTH: f32 = 220.;
 const COLLAPSED_WIDTH: f32 = 48.;
@@ -142,6 +143,8 @@ pub struct MailPage {
     html_parts: Vec<Vec<Block>>,
     /// Remote images of the open mail left out until the user loads them.
     blocked_images: Vec<String>,
+    /// The mail a right click opened the menu for, and where.
+    row_menu: Option<(String, Point<Pixels>)>,
     compose: Option<Compose>,
     search: Option<Entity<InputState>>,
     folders_hidden: bool,
@@ -184,6 +187,7 @@ impl MailPage {
             images: HashMap::new(),
             html_parts: Vec::new(),
             blocked_images: Vec::new(),
+            row_menu: None,
             compose: None,
             search: None,
             folders_hidden: false,
@@ -645,8 +649,10 @@ impl MailPage {
             if let Load::Ready(mail) = &mut this.list {
                 mail.retain(|mail| mail.id != message_id);
             }
-            this.open = None;
-            this.message = Load::Idle;
+            if this.open.as_ref() == Some(&message_id) {
+                this.open = None;
+                this.message = Load::Idle;
+            }
             cx.notify();
         };
         if self.demo(cx) {
@@ -663,18 +669,20 @@ impl MailPage {
         );
     }
 
-    fn mark_unread(&mut self, message_id: String, cx: &mut Context<Self>) {
-        self.set_read_locally(&message_id, false);
+    fn set_read(&mut self, message_id: String, read: bool, cx: &mut Context<Self>) {
+        self.set_read_locally(&message_id, read);
         self.set_unread(cx);
-        self.open = None;
-        self.message = Load::Idle;
+        if !read && self.open.as_ref() == Some(&message_id) {
+            self.open = None;
+            self.message = Load::Idle;
+        }
         cx.notify();
         if self.demo(cx) {
             return;
         }
         self.call(
             cx,
-            move |graph| async move { graph.set_mail_read(&message_id, false).await },
+            move |graph| async move { graph.set_mail_read(&message_id, read).await },
             |this, outcome, cx| {
                 if let Err(reason) = outcome {
                     this.notice(reason, cx);
@@ -1038,7 +1046,18 @@ impl MailPage {
             })
             .when(selected, |row| row.bg(theme::border_strong()))
             .hover(|row| row.bg(theme::row_hover()))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_message(id.clone(), cx)))
+            .on_click({
+                let id = id.clone();
+                cx.listener(move |this, _, _, cx| this.open_message(id.clone(), cx))
+            })
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    this.row_menu = Some((id.clone(), event.position));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
             .child(
                 h_flex()
                     .h(px(ROW_LINE))
@@ -1098,6 +1117,85 @@ impl MailPage {
             .into_any_element()
     }
 
+    fn render_row_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (id, position) = self.row_menu.clone()?;
+        let read = self.summary(&id)?.is_read;
+        let item = |key: &'static str, label: String, glyph: IconName| {
+            h_flex()
+                .id(key)
+                .px(px(10.))
+                .py(px(6.))
+                .gap(px(8.))
+                .items_center()
+                .rounded(px(4.))
+                .cursor_pointer()
+                .text_size(px(13.))
+                .text_color(theme::text())
+                .hover(|row| row.bg(theme::popup_hover()))
+                .child(icon(glyph, 14., theme::text_muted()))
+                .child(label)
+        };
+        let menu = v_flex()
+            .id("mail-row-menu")
+            .occlude()
+            .min_w(px(190.))
+            .p(px(4.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(theme::border())
+            .flyout_surface()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.row_menu = None;
+                cx.notify();
+            }))
+            .child(
+                item(
+                    "mail-menu-read",
+                    tr(if read {
+                        "mail.mark_unread"
+                    } else {
+                        "mail.mark_read"
+                    }),
+                    if read {
+                        IconName::Mail
+                    } else {
+                        IconName::MailOpen
+                    },
+                )
+                .on_click(cx.listener({
+                    let id = id.clone();
+                    move |this, _, _, cx| {
+                        this.row_menu = None;
+                        this.set_read(id.clone(), !read, cx);
+                    }
+                })),
+            )
+            .child(
+                item("mail-menu-archive", tr("mail.archive"), IconName::Folder).on_click(
+                    cx.listener({
+                        let id = id.clone();
+                        move |this, _, _, cx| {
+                            this.row_menu = None;
+                            this.file_away(id.clone(), ARCHIVE, cx);
+                        }
+                    }),
+                ),
+            )
+            .child(
+                item("mail-menu-delete", tr("mail.delete"), IconName::Trash).on_click(cx.listener(
+                    move |this, _, _, cx| {
+                        this.row_menu = None;
+                        this.file_away(id.clone(), DELETED, cx);
+                    },
+                )),
+            );
+        Some(
+            deferred(anchored().position(position).snap_to_window().child(menu))
+                .with_priority(POPUP_PRIORITY)
+                .into_any_element(),
+        )
+    }
+
     fn render_message(&self, cx: &mut Context<Self>) -> AnyElement {
         let (message, attachments) = match &self.message {
             Load::Idle => return centered(tr("mail.pick")),
@@ -1152,7 +1250,7 @@ impl MailPage {
                 action("mail-unread", tr("mail.mark_unread"), IconName::Mail).on_click(
                     cx.listener({
                         let id = id.clone();
-                        move |this, _, _, cx| this.mark_unread(id.clone(), cx)
+                        move |this, _, _, cx| this.set_read(id.clone(), false, cx)
                     }),
                 ),
             );
@@ -1744,6 +1842,7 @@ impl Render for MailPage {
             .child(self.render_folders(cx))
             .child(self.render_list(cx))
             .child(div().flex_1().min_w_0().h_full().child(right))
+            .children(self.render_row_menu(cx))
     }
 }
 

@@ -2175,6 +2175,9 @@ onedrive:
     en: The preview shows the first 40 pages, open the document for all of them
     de: Die Vorschau zeigt die ersten 40 Seiten, für alle das Dokument öffnen
 mail:
+  mark_read:
+    en: Mark as read
+    de: Als gelesen markieren
   images_blocked:
     en: Remote images are hidden to protect your privacy.
     de: Externe Bilder sind zum Schutz deiner Privatsphäre ausgeblendet.
