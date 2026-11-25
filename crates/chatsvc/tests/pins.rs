@@ -616,6 +616,34 @@ async fn folder_action_posts_still_take_a_full_answer_as_state() {
 }
 
 #[tokio::test]
+async fn folder_action_answer_with_only_the_changed_folders_is_reread() {
+    let before = || sections(10, &[("t~u~A", &["c"]), ("t~u~B", &[])], &[]);
+    let mut changed_only = json!({
+        "folderHierarchyVersion": 11,
+        "isPartialResponse": false,
+        "conversationFolders": [],
+    });
+    let after = sections(11, &[("t~u~A", &[]), ("t~u~B", &["c"])], &[]);
+    changed_only["conversationFolders"] = json!(
+        after["conversationFolders"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|folder| folder["folderType"] == "UserCreated")
+            .cloned()
+            .collect::<Vec<_>>()
+    );
+    let mock = Mock::new(vec![(200, before()), (200, changed_only), (200, after)]);
+    let state = pins(&mock)
+        .move_to_folder("c", "t~u~B", None)
+        .await
+        .unwrap();
+    assert_eq!(sent(&mock).len(), 3);
+    assert_eq!(state.folders.len(), 3);
+    assert_eq!(state.folders[2].conversation_ids, ["c"]);
+}
+
+#[tokio::test]
 async fn rename_folder_puts_the_name_on_the_folder_url() {
     let mock = Mock::new(vec![
         (200, sections(10, &[("t~u~A", &[])], &[])),
