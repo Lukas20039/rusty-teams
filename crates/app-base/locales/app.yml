@@ -719,6 +719,9 @@ rail:
   onedrive:
     en: OneDrive
     de: OneDrive
+  mail:
+    en: Mail
+    de: E-Mail
   shortcut_activity:
     en: Open Activity
     de: Aktivität öffnen
@@ -2171,3 +2174,88 @@ onedrive:
   preview_more_pages:
     en: The preview shows the first 40 pages, open the document for all of them
     de: Die Vorschau zeigt die ersten 40 Seiten, für alle das Dokument öffnen
+mail:
+  new:
+    en: New mail
+    de: Neue E-Mail
+  search:
+    en: Search mail
+    de: E-Mails durchsuchen
+  results:
+    en: Search results
+    de: Suchergebnisse
+  loading:
+    en: Loading …
+    de: Wird geladen …
+  empty:
+    en: No mail here.
+    de: Hier sind keine E-Mails.
+  pick:
+    en: Select a mail to read it.
+    de: Wähle eine E-Mail aus, um sie zu lesen.
+  not_found:
+    en: Mail not found
+    de: E-Mail nicht gefunden
+  not_connected:
+    en: not connected
+    de: nicht verbunden
+  reply:
+    en: Reply
+    de: Antworten
+  reply_all:
+    en: Reply all
+    de: Allen antworten
+  forward:
+    en: Forward
+    de: Weiterleiten
+  archive:
+    en: Archive
+    de: Archivieren
+  delete:
+    en: Delete
+    de: Löschen
+  mark_unread:
+    en: Mark unread
+    de: Als ungelesen markieren
+  to:
+    en: To
+    de: An
+  cc:
+    en: Cc
+    de: Cc
+  subject:
+    en: Subject
+    de: Betreff
+  body:
+    en: Write your message …
+    de: Nachricht schreiben …
+  reply_to:
+    en: Reply to
+    de: Antwort an
+  reply_all_to:
+    en: Reply all to
+    de: Allen antworten an
+  quoted_below:
+    en: Outlook adds the original mail below your text.
+    de: Outlook hängt die ursprüngliche E-Mail unter deinem Text an.
+  discard:
+    en: Discard
+    de: Verwerfen
+  send:
+    en: Send
+    de: Senden
+  sending:
+    en: Sending …
+    de: Wird gesendet …
+  sent:
+    en: Mail sent
+    de: E-Mail gesendet
+  not_sent:
+    en: Mail not sent
+    de: E-Mail nicht gesendet
+  no_recipient:
+    en: Add at least one recipient
+    de: Mindestens einen Empfänger angeben
+  demo_attachment:
+    en: Attachments need a signed-in account
+    de: Anhänge brauchen ein angemeldetes Konto

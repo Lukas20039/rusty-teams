@@ -96,6 +96,13 @@ fn rail_items(
             icon: IconName::Cloud,
             badge: RailBadge::None,
         },
+        RailItem {
+            tab: SidebarTab::Mail,
+            label: tr("rail.mail"),
+            shortcut_label: "Open Mail",
+            icon: IconName::Mail,
+            badge: RailBadge::None,
+        },
     ];
     if !calendar {
         items.retain(|item| item.tab != SidebarTab::Calendar);
@@ -245,13 +252,16 @@ impl Render for RailView {
                 state.calendar_available(),
             )
         };
-        let items = rail_items(
+        let mut items = rail_items(
             activity_unread,
             unread_chats as usize,
             channel_dot,
             calendar,
             self.agents_running(cx),
         );
+        if let Some(mail) = items.iter_mut().find(|item| item.tab == SidebarTab::Mail) {
+            mail.badge = count_badge_for(crate::views::mail_page::mail_unread(cx));
+        }
         v_flex()
             .debug_selector(|| "shell/islands/rail".into())
             .w(px(RAIL_WIDTH))
@@ -287,7 +297,8 @@ mod tests {
                 SidebarTab::Channels,
                 SidebarTab::Calendar,
                 SidebarTab::Calls,
-                SidebarTab::OneDrive
+                SidebarTab::OneDrive,
+                SidebarTab::Mail
             ]
         );
     }
@@ -300,20 +311,20 @@ mod tests {
             .map(|item| item.tab)
             .collect();
         assert!(!tabs.contains(&SidebarTab::Calendar));
-        assert_eq!(tabs.len(), 5);
+        assert_eq!(tabs.len(), 6);
     }
 
     #[test]
     fn agents_comes_last_and_only_when_actions_exist() {
         apply_locale("en");
-        assert_eq!(rail_items(0, 0, false, true, None).len(), 6);
+        assert_eq!(rail_items(0, 0, false, true, None).len(), 7);
         let with_agents = rail_items(0, 0, false, true, Some(2));
-        assert_eq!(with_agents.len(), 7);
-        assert_eq!(with_agents[6].tab, SidebarTab::Agents);
-        assert_eq!(with_agents[6].label, tr("rail.agents"));
-        assert_eq!(with_agents[6].badge, RailBadge::Count(2));
+        assert_eq!(with_agents.len(), 8);
+        assert_eq!(with_agents[7].tab, SidebarTab::Agents);
+        assert_eq!(with_agents[7].label, tr("rail.agents"));
+        assert_eq!(with_agents[7].badge, RailBadge::Count(2));
         assert_eq!(
-            rail_items(0, 0, false, true, Some(0))[6].badge,
+            rail_items(0, 0, false, true, Some(0))[7].badge,
             RailBadge::None
         );
     }

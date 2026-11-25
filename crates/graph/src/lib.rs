@@ -4,6 +4,7 @@ mod content;
 mod error;
 mod files;
 mod library;
+mod mail;
 mod mailbox;
 mod models;
 mod outgoing;
@@ -24,6 +25,10 @@ pub use files::{
     percent_done, share_id,
 };
 pub use library::DriveEntry;
+pub use mail::{
+    ARCHIVE, DELETED, INBOX, MailAttachment, MailFolder, MailMessage, MailSummary, OutgoingMail,
+    Response, split_addresses,
+};
 pub use mailbox::{MailboxWorkingHours, parse_working_hours, working_hours_body};
 pub use models::{
     Attachment, Body, Channel, Chat, ChatViewpoint, Identity, Member, Mention, Message,

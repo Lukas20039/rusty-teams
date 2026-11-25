@@ -67,6 +67,7 @@ pub mod jumbo_emoji;
 mod last_views;
 pub mod link_preview;
 pub mod local_edit;
+pub mod mail_page;
 pub mod manage_team_page;
 pub mod meeting_proposal_card;
 pub mod message_actions;

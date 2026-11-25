@@ -17,6 +17,7 @@ use super::conversation::ConversationView;
 use super::dialog_overlay::render_task_dialog;
 use super::forward_dialog::{ForwardDialog, ForwardDialogEvent};
 use super::image_viewer::{ImageViewer, ImageViewerEvent};
+use super::mail_page::MailPage;
 use super::manage_team_page::ManageTeamPage;
 use super::notice_toast::NoticeToasts;
 use super::onedrive_page::OneDrivePage;
@@ -27,7 +28,7 @@ use super::shortcuts::{
     ClearChatFilters, DeclineCall, FilterMeetingChats, FilterMutedChats, FilterNonMeetingChats,
     FilterUnreadChats, FindInChat, HangUpCall, JoinMeetingFromToast, JumpToLastReadOrNewest,
     NextConversation, OpenActivity, OpenAgents, OpenCalendar, OpenCallsTab, OpenChannelsTab,
-    OpenChatFilter, OpenChatsTab, OpenLobbyList, OpenOneDrive, OpenSaved, OpenSettings,
+    OpenChatFilter, OpenChatsTab, OpenLobbyList, OpenMail, OpenOneDrive, OpenSaved, OpenSettings,
     PopOutSelectedChat, PreviousConversation, PushToTalk, Scope, ShowShortcuts, StartAudioCall,
     StartVideoCall, ToggleCallCamera, ToggleCallHand, ToggleCallShare, ZoomIn, ZoomOut, ZoomReset,
     ZoomShareIn, ZoomShareOut, ZoomShareReset,
@@ -196,6 +197,7 @@ pub struct AppShell {
     manage_team_page: Entity<ManageTeamPage>,
     calls_page: Entity<CallsPage>,
     onedrive_page: Entity<OneDrivePage>,
+    mail_page: Entity<MailPage>,
     shown_quick_view: Option<QuickView>,
     conversation: Entity<ConversationView>,
     switcher: Option<Entity<Switcher>>,
@@ -282,6 +284,7 @@ impl AppShell {
         let manage_team_page = cx.new(|cx| ManageTeamPage::new(state.clone(), window, cx));
         let calls_page = cx.new(|cx| CallsPage::new(state.clone(), window, cx));
         let onedrive_page = cx.new(|_| OneDrivePage::new(state.clone()));
+        let mail_page = cx.new(|cx| MailPage::new(state.clone(), cx));
         let agents_panel = crate::agents::runs_handle(cx)
             .map(|runs| cx.new(|cx| crate::agents::AgentsPanel::new(runs, cx)));
         let agents_subscription = agents_panel.as_ref().map(|panel| {
@@ -455,6 +458,7 @@ impl AppShell {
             manage_team_page,
             calls_page,
             onedrive_page,
+            mail_page,
             shown_quick_view: None,
             conversation,
             switcher: None,
@@ -1009,7 +1013,7 @@ impl AppShell {
         calendar_open: bool,
         quick_view_open: bool,
         calls_open: bool,
-        onedrive_open: bool,
+        side_page: Option<AnyView>,
         manage_team_open: bool,
     ) -> Div {
         h_flex()
@@ -1033,33 +1037,35 @@ impl AppShell {
                     )
                 },
             ))
-            .child(match () {
-                _ if onedrive_open => self.onedrive_page.clone().into_any_element(),
-                _ if calls_open => self
-                    .calls_page
-                    .clone()
-                    .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
-                    .into_any_element(),
-                _ if manage_team_open => self
-                    .manage_team_page
-                    .clone()
-                    .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
-                    .into_any_element(),
-                _ if quick_view_open => self
-                    .quick_pane
-                    .clone()
-                    .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
-                    .into_any_element(),
-                _ if calendar_open => self
-                    .calendar
-                    .clone()
-                    .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
-                    .into_any_element(),
-                _ => self
-                    .conversation
-                    .clone()
-                    .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
-                    .into_any_element(),
+            .child(match side_page {
+                Some(page) => page.into_any_element(),
+                None => match () {
+                    _ if calls_open => self
+                        .calls_page
+                        .clone()
+                        .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
+                        .into_any_element(),
+                    _ if manage_team_open => self
+                        .manage_team_page
+                        .clone()
+                        .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
+                        .into_any_element(),
+                    _ if quick_view_open => self
+                        .quick_pane
+                        .clone()
+                        .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
+                        .into_any_element(),
+                    _ if calendar_open => self
+                        .calendar
+                        .clone()
+                        .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
+                        .into_any_element(),
+                    _ => self
+                        .conversation
+                        .clone()
+                        .cached(StyleRefinement::default().flex_1().min_w_0().h_full())
+                        .into_any_element(),
+                },
             })
     }
 }
@@ -1112,7 +1118,12 @@ impl Render for AppShell {
         let calendar_tab = self.sidebar.read(cx).tab() == SidebarTab::Calendar;
         let chats_tab = self.sidebar.read(cx).tab() == SidebarTab::Chats;
         let calls_tab = self.sidebar.read(cx).tab() == SidebarTab::Calls;
-        let onedrive_open = self.sidebar.read(cx).tab() == SidebarTab::OneDrive;
+        let side_page: Option<AnyView> = match self.sidebar.read(cx).tab() {
+            SidebarTab::OneDrive => Some(self.onedrive_page.clone().into()),
+            SidebarTab::Mail => Some(self.mail_page.clone().into()),
+            _ => None,
+        };
+        let onedrive_open = side_page.is_some();
         let splash = self.render_splash(cx);
         let state = self.state.read(cx);
         let calendar_open = calendar_tab;
@@ -1258,6 +1269,10 @@ impl Render for AppShell {
                 this.sidebar
                     .update(cx, |sidebar, cx| sidebar.show_channels(cx));
             }))
+            .on_action(cx.listener(|this, _: &OpenMail, window, cx| {
+                this.close_image_viewer(window, cx);
+                this.sidebar.update(cx, |sidebar, cx| sidebar.show_mail(cx));
+            }))
             .on_action(cx.listener(|this, _: &OpenOneDrive, window, cx| {
                 this.close_image_viewer(window, cx);
                 this.sidebar
@@ -1364,7 +1379,7 @@ impl Render for AppShell {
                             calendar_open,
                             quick_view_open,
                             calls_open,
-                            onedrive_open,
+                            side_page,
                             manage_team_open,
                         ),
                         &self.splash,

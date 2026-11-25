@@ -96,6 +96,7 @@ pub enum SidebarTab {
     Calendar,
     Calls,
     OneDrive,
+    Mail,
     Agents,
 }
 
@@ -108,6 +109,7 @@ impl SidebarTab {
             SidebarTab::Calendar => tr("rail.calendar"),
             SidebarTab::Calls => tr("rail.calls"),
             SidebarTab::OneDrive => tr("rail.onedrive"),
+            SidebarTab::Mail => tr("rail.mail"),
             SidebarTab::Agents => tr("rail.agents"),
         }
     }
@@ -515,6 +517,10 @@ impl SidebarView {
         self.open_tab(SidebarTab::OneDrive, cx);
     }
 
+    pub fn show_mail(&mut self, cx: &mut Context<Self>) {
+        self.open_tab(SidebarTab::Mail, cx);
+    }
+
     pub fn show_calendar(&mut self, cx: &mut Context<Self>) {
         self.open_tab(SidebarTab::Calendar, cx);
     }
@@ -590,6 +596,7 @@ impl SidebarView {
             | SidebarTab::Calendar
             | SidebarTab::Calls
             | SidebarTab::OneDrive
+            | SidebarTab::Mail
             | SidebarTab::Agents => None,
         };
         if let Some(selection) = selection {
@@ -2153,7 +2160,7 @@ impl Render for SidebarView {
                 Some(panel) => panel.clone().into_any_element(),
                 None => div().into_any_element(),
             },
-            SidebarTab::Calls | SidebarTab::Calendar | SidebarTab::OneDrive => {
+            SidebarTab::Calls | SidebarTab::Calendar | SidebarTab::OneDrive | SidebarTab::Mail => {
                 div().into_any_element()
             }
         };
@@ -2184,7 +2191,8 @@ impl Render for SidebarView {
             SidebarTab::Activity
             | SidebarTab::Calls
             | SidebarTab::Calendar
-            | SidebarTab::OneDrive => None,
+            | SidebarTab::OneDrive
+            | SidebarTab::Mail => None,
         };
         v_flex()
             .debug_selector(|| "shell/islands/sidebar".into())
