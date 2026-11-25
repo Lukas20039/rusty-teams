@@ -44,6 +44,17 @@ pub struct UploadedFile {
     pub web_url: String,
     pub web_dav_url: Option<String>,
     pub etag: String,
+    /// Stored in the home tenant's OneDrive while a guest org is open.
+    #[serde(default)]
+    pub home_drive: bool,
+}
+
+/// Who gets access to a shared file. A file in the home drive of a guest org takes emails,
+/// because the guest org's user ids do not exist in the home tenant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Recipient {
+    ObjectId(String),
+    Email(String),
 }
 
 impl UploadedFile {
@@ -157,13 +168,6 @@ fn range_header(start: u64, end: Option<u64>) -> String {
 }
 
 /// First byte the server still wants, from `nextExpectedRanges` (`["1310720-"]`).
-fn upload_url_of(body: &Value) -> Result<String> {
-    body.get("uploadUrl")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .ok_or_else(|| Error::Upload("no upload URL in the answer".into()))
-}
-
 pub fn next_expected_start(body: &Value) -> Option<u64> {
     let range = body
         .get("nextExpectedRanges")?
@@ -228,7 +232,12 @@ pub fn numbered_name(file_name: &str, number: usize) -> String {
 
 impl Graph {
     /// conflictBehavior=rename was not honored on upload sessions: a same-named upload replaced the file.
-    async fn free_name(&self, destination: &UploadDestination, file_name: &str) -> Result<String> {
+    async fn free_name(
+        &self,
+        session: &Session,
+        destination: &UploadDestination,
+        file_name: &str,
+    ) -> Result<String> {
         for number in 0..MAX_NAME_ATTEMPTS {
             let candidate = numbered_name(file_name, number);
             let url = match destination {
@@ -237,8 +246,7 @@ impl Graph {
                     urls::folder_item(&folder.drive_id, &folder.item_id, &candidate)
                 }
             };
-            match self
-                .session()
+            match session
                 .request(Method::Get, &url, &Scope::graph(FILES_SCOPE), None)
                 .await
             {
@@ -285,8 +293,11 @@ impl Graph {
             return Err(Error::EmptyUpload);
         }
         let scope = Scope::graph(FILES_SCOPE);
+        let home_drive =
+            matches!(destination, UploadDestination::ChatFiles) && self.has_home_drive();
+        let session = self.drive_session(home_drive)?;
         let shown_name = file_name;
-        let file_name = self.free_name(destination, file_name).await?;
+        let file_name = self.free_name(session, destination, file_name).await?;
         let file_name = file_name.as_str();
         let session_url = match destination {
             UploadDestination::ChatFiles => urls::chat_files_upload_session(file_name),
@@ -294,8 +305,7 @@ impl Graph {
                 urls::folder_upload_session(&folder.drive_id, &folder.item_id, file_name)
             }
         };
-        let created = self
-            .session()
+        let created = session
             .request(
                 Method::Post,
                 &session_url,
@@ -303,66 +313,14 @@ impl Graph {
                 Some(json!({"item": {"@microsoft.graph.conflictBehavior": "fail"}})),
             )
             .await?;
-        let mut uploaded = self
-            .send_chunks(upload_url_of(&created.body)?, bytes, progress, &scope)
-            .await?;
-        uploaded.name = shown_name.to_owned();
-        Ok(uploaded)
-    }
-
-    /// Replaces the content of an existing file, unless it changed online since `etag` was read.
-    pub async fn replace_file(
-        &self,
-        drive_id: &str,
-        item_id: &str,
-        bytes: &[u8],
-        etag: &str,
-    ) -> Result<UploadedFile> {
-        if bytes.is_empty() {
-            return Err(Error::EmptyUpload);
-        }
-        let scope = Scope::graph(FILES_SCOPE);
-        let mut request = Request::with_body(
-            Method::Post,
-            urls::item_upload_session(drive_id, item_id),
-            json!({"item": {"@microsoft.graph.conflictBehavior": "replace"}}),
-        );
-        request
-            .headers
-            .push(("If-Match".to_owned(), etag.to_owned()));
-        let created = match self.session().send(request, &scope).await {
-            Err(session::Error::Api { status: 412, .. }) => return Err(Error::ChangedOnline),
-            other => other?,
-        };
-        self.send_chunks(upload_url_of(&created.body)?, bytes, &|_| {}, &scope)
-            .await
-    }
-
-    pub async fn drive_item_etag(&self, drive_id: &str, item_id: &str) -> Result<String> {
-        let answer = self
-            .session()
-            .request(
-                Method::Get,
-                &urls::drive_item_etag(drive_id, item_id),
-                &Scope::graph(FILES_SCOPE),
-                None,
-            )
-            .await?;
-        answer.body["eTag"]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| Error::Decode("a drive item without an eTag".into()))
-    }
-
-    async fn send_chunks(
-        &self,
-        upload_url: String,
-        bytes: &[u8],
-        progress: &(dyn Fn(u8) + Send + Sync),
-        scope: &Scope,
-    ) -> Result<UploadedFile> {
+        let upload_url = created
+            .body
+            .get("uploadUrl")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Upload("no upload URL in the answer".into()))?
+            .to_owned();
         let mut guard = SessionGuard {
-            session: self.session().clone(),
+            session: session.clone(),
             url: upload_url.clone(),
             armed: true,
         };
@@ -378,11 +336,14 @@ impl Graph {
                 vec![("Content-Range".to_owned(), content_range(start, end, total))],
                 STANDARD.encode(&bytes[start as usize..=end as usize]),
             );
-            match self.session().send(request, scope).await {
+            match session.send(request, &scope).await {
                 Ok(answer) if matches!(answer.status, 200 | 201) => {
                     guard.disarm();
                     progress(100);
-                    return finished_item(answer.body);
+                    let mut uploaded = finished_item(answer.body)?;
+                    uploaded.name = shown_name.to_owned();
+                    uploaded.home_drive = home_drive;
+                    return Ok(uploaded);
                 }
                 Ok(_) => {
                     failures = 0;
@@ -394,7 +355,7 @@ impl Graph {
                     if failures > MAX_CHUNK_RETRIES {
                         return Err(error.into());
                     }
-                    if let Some(next) = self.resume_offset(&upload_url, scope).await {
+                    if let Some(next) = resume_offset(session, &upload_url, &scope).await {
                         offset = next.min(total);
                     }
                 }
@@ -405,37 +366,30 @@ impl Graph {
         ))
     }
 
-    async fn resume_offset(&self, upload_url: &str, scope: &Scope) -> Option<u64> {
-        let request = Request {
-            anonymous: true,
-            ..Request::get(upload_url)
-        };
-        let answer = self.session().send(request, scope).await.ok()?;
-        next_expected_start(&answer.body)
-    }
-
     pub async fn resolve_share(&self, open_url: &str) -> Result<SharedFile> {
-        let answer = self
-            .session()
-            .request(
-                Method::Get,
-                &urls::shared_drive_item(&share_id(open_url)),
-                &Scope::graph(FILES_SCOPE),
-                None,
-            )
-            .await?;
-        shared_file(answer.body)
+        let url = urls::shared_drive_item(&share_id(open_url));
+        self.drive_item_request(&url).await
     }
 
     pub async fn resolve_drive_item(&self, drive_id: &str, item_id: &str) -> Result<SharedFile> {
-        let answer = self
-            .session()
-            .request(
-                Method::Get,
-                &urls::drive_item(drive_id, item_id),
-                &Scope::graph(FILES_SCOPE),
-                None,
-            )
+        let url = urls::drive_item(drive_id, item_id);
+        self.drive_item_request(&url).await
+    }
+
+    /// A guest-org session cannot see a file that lives in the home OneDrive.
+    /// A 401 there is retried with the home session.
+    async fn drive_item_request(&self, url: &str) -> Result<SharedFile> {
+        match self.item_request(self.session(), url).await {
+            Err(error) if unauthorized(&error) && self.has_home_drive() => {
+                self.item_request(self.drive_session(true)?, url).await
+            }
+            other => other,
+        }
+    }
+
+    async fn item_request(&self, session: &Session, url: &str) -> Result<SharedFile> {
+        let answer = session
+            .request(Method::Get, url, &Scope::graph(FILES_SCOPE), None)
             .await?;
         shared_file(answer.body)
     }
@@ -475,11 +429,98 @@ impl Graph {
         Ok(decode_binary(&url, answer)?.bytes)
     }
 
-    pub async fn delete_drive_item(&self, drive_id: &str, item_id: &str) -> Result<()> {
-        self.session()
+    pub async fn drive_item_etag(&self, drive_id: &str, item_id: &str) -> Result<String> {
+        let answer = self
+            .session()
+            .request(
+                Method::Get,
+                &urls::drive_item_etag(drive_id, item_id),
+                &Scope::graph(FILES_SCOPE),
+                None,
+            )
+            .await?;
+        answer.body["eTag"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Decode("a drive item without an eTag".into()))
+    }
+
+    /// Replaces the content of an existing file, unless it changed online since `etag` was read.
+    pub async fn replace_file(
+        &self,
+        drive_id: &str,
+        item_id: &str,
+        bytes: &[u8],
+        etag: &str,
+    ) -> Result<UploadedFile> {
+        if bytes.is_empty() {
+            return Err(Error::EmptyUpload);
+        }
+        let scope = Scope::graph(FILES_SCOPE);
+        let mut request = Request::with_body(
+            Method::Post,
+            urls::item_upload_session(drive_id, item_id),
+            json!({"item": {"@microsoft.graph.conflictBehavior": "replace"}}),
+        );
+        request
+            .headers
+            .push(("If-Match".to_owned(), etag.to_owned()));
+        let created = match self.session().send(request, &scope).await {
+            Err(session::Error::Api { status: 412, .. }) => return Err(Error::ChangedOnline),
+            other => other?,
+        };
+        let upload_url = created
+            .body
+            .get("uploadUrl")
+            .and_then(Value::as_str)
+            .ok_or_else(|| Error::Upload("no upload URL in the answer".into()))?
+            .to_owned();
+        let session = self.session();
+        let mut guard = SessionGuard {
+            session: session.clone(),
+            url: upload_url.clone(),
+            armed: true,
+        };
+        let total = bytes.len() as u64;
+        let (mut offset, mut failures) = (0, 0);
+        while offset < total {
+            let (start, end) = chunk_range_at(offset, total);
+            let request = Request::anonymous_bytes(
+                Method::Put,
+                upload_url.clone(),
+                vec![("Content-Range".to_owned(), content_range(start, end, total))],
+                STANDARD.encode(&bytes[start as usize..=end as usize]),
+            );
+            match session.send(request, &scope).await {
+                Ok(answer) if matches!(answer.status, 200 | 201) => {
+                    guard.disarm();
+                    return finished_item(answer.body);
+                }
+                Ok(_) => {
+                    failures = 0;
+                    offset = end + 1;
+                }
+                Err(error) => {
+                    failures += 1;
+                    if failures > MAX_CHUNK_RETRIES {
+                        return Err(error.into());
+                    }
+                    if let Some(next) = resume_offset(session, &upload_url, &scope).await {
+                        offset = next.min(total);
+                    }
+                }
+            }
+        }
+        Err(Error::Upload(
+            "the last chunk did not finish the upload".into(),
+        ))
+    }
+
+    pub async fn delete_uploaded(&self, file: &UploadedFile) -> Result<()> {
+        self.drive_session(file.home_drive)?
             .request(
                 Method::Delete,
-                &urls::drive_item(drive_id, item_id),
+                &urls::drive_item(&file.drive_id, &file.item_id),
                 &Scope::graph(FILES_SCOPE),
                 None,
             )
@@ -487,29 +528,84 @@ impl Graph {
         Ok(())
     }
 
-    pub async fn share_item(&self, file: &UploadedFile, user_ids: &[String]) -> Result<()> {
-        if user_ids.is_empty() {
-            return Ok(());
+    /// `Some` is the sharing-link URL when Graph returned one. The chat message should
+    /// carry that link: a specific-people grant is redeemed through it, not the item URL.
+    pub async fn share_item(
+        &self,
+        file: &UploadedFile,
+        recipients: &[Recipient],
+    ) -> Result<Option<String>> {
+        if recipients.is_empty() {
+            return Ok(None);
         }
-        let recipients: Vec<Value> = user_ids
-            .iter()
-            .map(|user_id| json!({"objectId": user_id}))
-            .collect();
-        self.session()
-            .request(
-                Method::Post,
-                &urls::drive_item_invite(&file.drive_id, &file.item_id),
-                &Scope::graph(FILES_SCOPE),
-                Some(json!({
-                    "recipients": recipients,
-                    "roles": ["read"],
-                    "requireSignIn": true,
-                    "sendInvitation": false,
-                })),
-            )
-            .await?;
-        Ok(())
+        let (url, body) = share_request(file, recipients);
+        let answer = self
+            .drive_session(file.home_drive)?
+            .request(Method::Post, &url, &Scope::graph(FILES_SCOPE), Some(body))
+            .await
+            .map_err(share_error)?;
+        Ok(answer
+            .body
+            .pointer("/link/webUrl")
+            .and_then(Value::as_str)
+            .map(str::to_owned))
     }
+}
+
+fn unauthorized(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Session(session::Error::Api { status: 401, .. })
+    )
+}
+
+/// Sharing errors carry a generic message; the code and inner error in the body name the cause.
+fn share_error(error: session::Error) -> Error {
+    match error {
+        session::Error::Api { status, body, .. } => {
+            let code = body
+                .pointer("/error/code")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let detail = format!("HTTP {status}: {}", body.pointer("/error").unwrap_or(&body));
+            // Only the organization's sharing policy. A 401 or a network error stays a failure
+            // the user can retry, instead of the "does not allow sharing" notice.
+            if code.eq_ignore_ascii_case("sharingFailed") {
+                Error::SharingDenied(detail)
+            } else {
+                Error::Upload(format!("sharing answered {detail}"))
+            }
+        }
+        other => other.into(),
+    }
+}
+
+/// A file in the home drive gets a specific-people link like Teams creates for a guest's chat
+/// files: an invite fails there because the other org's people are not guests of the home tenant
+/// yet, while a link lets them in when they open it.
+fn share_request(file: &UploadedFile, recipients: &[Recipient]) -> (String, Value) {
+    let recipients: Vec<Value> = recipients
+        .iter()
+        .map(|recipient| match recipient {
+            Recipient::ObjectId(id) => json!({"objectId": id}),
+            Recipient::Email(email) => json!({"email": email}),
+        })
+        .collect();
+    if file.home_drive {
+        return (
+            urls::drive_item_create_link(&file.drive_id, &file.item_id),
+            json!({"type": "view", "scope": "users", "recipients": recipients}),
+        );
+    }
+    (
+        urls::drive_item_invite(&file.drive_id, &file.item_id),
+        json!({
+            "recipients": recipients,
+            "roles": ["read"],
+            "requireSignIn": true,
+            "sendInvitation": false,
+        }),
+    )
 }
 
 pub(crate) fn finished_item(body: Value) -> Result<UploadedFile> {
@@ -524,7 +620,17 @@ pub(crate) fn finished_item(body: Value) -> Result<UploadedFile> {
         web_url: item.web_url,
         web_dav_url: item.web_dav_url,
         etag: item.e_tag,
+        home_drive: false,
     })
+}
+
+async fn resume_offset(session: &Session, upload_url: &str, scope: &Scope) -> Option<u64> {
+    let request = Request {
+        anonymous: true,
+        ..Request::get(upload_url)
+    };
+    let answer = session.send(request, scope).await.ok()?;
+    next_expected_start(&answer.body)
 }
 
 #[cfg(test)]
@@ -689,6 +795,49 @@ mod tests {
     }
 
     #[test]
+    fn only_sharing_failed_is_a_denied_share() {
+        let denied = share_error(session::Error::api(
+            403,
+            "https://graph.microsoft.com/createLink",
+            json!({"error": {"code": "sharingFailed", "message": "blocked"}}),
+        ));
+        assert!(matches!(denied, Error::SharingDenied(_)));
+        let unauthorized = share_error(session::Error::api(
+            401,
+            "https://graph.microsoft.com/createLink",
+            json!({"error": {"code": "InvalidAuthenticationToken", "message": "no"}}),
+        ));
+        assert!(matches!(unauthorized, Error::Upload(_)));
+    }
+
+    #[test]
+    fn a_home_drive_file_is_shared_with_a_specific_people_link() {
+        let file = UploadedFile {
+            drive_id: "d".into(),
+            item_id: "i".into(),
+            name: "a.xlsx".into(),
+            web_url: "https://x/web".into(),
+            web_dav_url: None,
+            etag: "\"{AAAA},1\"".into(),
+            home_drive: true,
+        };
+        let (url, body) = share_request(&file, &[Recipient::Email("ada@example.com".into())]);
+        assert!(url.ends_with("/drives/d/items/i/createLink"));
+        assert_eq!(
+            body,
+            json!({"type": "view", "scope": "users", "recipients": [{"email": "ada@example.com"}]})
+        );
+        let (url, _) = share_request(
+            &UploadedFile {
+                home_drive: false,
+                ..file
+            },
+            &[Recipient::ObjectId("u".into())],
+        );
+        assert!(url.ends_with("/drives/d/items/i/invite"));
+    }
+
+    #[test]
     fn uploaded_file_reference_prefers_the_webdav_url() {
         let mut file = UploadedFile {
             drive_id: "d".into(),
@@ -697,6 +846,7 @@ mod tests {
             web_url: "https://x/web".into(),
             web_dav_url: Some("https://x/dav".into()),
             etag: "\"{AAAA},1\"".into(),
+            home_drive: false,
         };
         let reference = file.reference().unwrap();
         assert_eq!(reference.attachment_id, "AAAA");
