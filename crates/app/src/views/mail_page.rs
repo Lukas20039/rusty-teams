@@ -1141,8 +1141,6 @@ impl MailPage {
             .min_w(px(190.))
             .p(px(4.))
             .rounded(px(8.))
-            .border_1()
-            .border_color(theme::border())
             .flyout_surface()
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                 this.row_menu = None;
