@@ -2175,6 +2175,12 @@ onedrive:
     en: The preview shows the first 40 pages, open the document for all of them
     de: Die Vorschau zeigt die ersten 40 Seiten, für alle das Dokument öffnen
 mail:
+  images_blocked:
+    en: Remote images are hidden to protect your privacy.
+    de: Externe Bilder sind zum Schutz deiner Privatsphäre ausgeblendet.
+  load_images:
+    en: Load images
+    de: Bilder laden
   folders:
     en: Show or hide folders
     de: Ordner ein- oder ausblenden

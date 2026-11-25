@@ -27,7 +27,7 @@ pub use files::{
 pub use library::DriveEntry;
 pub use mail::{
     ARCHIVE, DELETED, INBOX, MailAttachment, MailFolder, MailMessage, MailSummary, OutgoingMail,
-    Response, ThreadPart, split_addresses, split_thread,
+    Response, ThreadPart, split_addresses, split_html_thread, split_thread,
 };
 pub use mailbox::{MailboxWorkingHours, parse_working_hours, working_hours_body};
 pub use models::{

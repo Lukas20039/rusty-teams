@@ -48,8 +48,10 @@ pub struct MailMessage {
     pub summary: MailSummary,
     pub to: Vec<String>,
     pub cc: Vec<String>,
-    /// Plain text: Graph converts HTML mail on request.
+    /// Set for a plain text mail.
     pub body: String,
+    /// Set for an HTML mail.
+    pub html: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +60,8 @@ pub struct MailAttachment {
     pub name: String,
     pub size: u64,
     pub inline: bool,
+    /// What the HTML body references as `cid:…`.
+    pub content_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,11 +147,21 @@ pub fn parse_summaries(body: &Value) -> Vec<MailSummary> {
 }
 
 pub fn parse_message(message: &Value) -> MailMessage {
+    let content = text(&message["body"]["content"]);
+    let html = message["body"]["contentType"]
+        .as_str()
+        .is_some_and(|kind| kind.eq_ignore_ascii_case("html"));
+    let (body, html) = if html {
+        (String::new(), content)
+    } else {
+        (content, String::new())
+    };
     MailMessage {
         summary: parse_summary(message),
         to: addresses(&message["toRecipients"]),
         cc: addresses(&message["ccRecipients"]),
-        body: text(&message["body"]["content"]),
+        body,
+        html,
     }
 }
 
@@ -158,6 +172,7 @@ pub fn parse_attachments(body: &Value) -> Vec<MailAttachment> {
             name: text(&attachment["name"]),
             size: attachment["size"].as_u64().unwrap_or(0),
             inline: attachment["isInline"].as_bool().unwrap_or(false),
+            content_id: attachment["contentId"].as_str().map(str::to_owned),
         })
         .collect()
 }
@@ -297,6 +312,35 @@ pub fn split_thread(body: &str) -> Vec<ThreadPart> {
     parts
 }
 
+/// Where clients start the quoted mail: Outlook web and desktop, Gmail, Apple Mail.
+const HTML_QUOTE_STARTS: [&str; 4] = [
+    "<div id=\"divrplyfwdmsg\"",
+    "<div style=\"border:none;border-top:solid #e1e1e1",
+    "<div class=\"gmail_quote",
+    "<blockquote type=\"cite\"",
+];
+
+/// Cuts an HTML body before each quoted mail, newest first. The pieces need not be balanced:
+/// the HTML parser closes what is left open.
+pub fn split_html_thread(html: &str) -> Vec<&str> {
+    let lower = html.to_ascii_lowercase();
+    let mut cuts: Vec<usize> = HTML_QUOTE_STARTS
+        .iter()
+        .flat_map(|marker| lower.match_indices(marker).map(|(index, _)| index))
+        .filter(|index| *index > 0)
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for cut in cuts {
+        parts.push(&html[start..cut]);
+        start = cut;
+    }
+    parts.push(&html[start..]);
+    parts
+}
+
 /// Splits what the user typed into the To or Cc field.
 pub fn split_addresses(field: &str) -> Vec<String> {
     field
@@ -357,7 +401,7 @@ impl Graph {
         ));
         request.headers.push((
             "Prefer".to_owned(),
-            "outlook.body-content-type=\"text\"".to_owned(),
+            "outlook.body-content-type=\"html\"".to_owned(),
         ));
         let answer = self.session().send(request, &Self::mail_scope()).await?;
         Ok(parse_message(&answer.body))
@@ -365,7 +409,7 @@ impl Graph {
 
     pub async fn mail_attachments(&self, message_id: &str) -> Result<Vec<MailAttachment>> {
         let url = format!(
-            "{API}/messages/{}/attachments?$select=id,name,size,isInline",
+            "{API}/messages/{}/attachments?$select=id,name,size,isInline,microsoft.graph.fileAttachment/contentId",
             segment(message_id)
         );
         Ok(parse_attachments(
@@ -556,6 +600,35 @@ mod tests {
     fn a_from_line_in_the_text_is_not_a_quote() {
         let parts = split_thread("From: the start\nwe planned it");
         assert_eq!(parts.len(), 1);
+    }
+
+    #[test]
+    fn an_html_thread_is_cut_before_each_quoted_mail() {
+        let html = "<p>new</p><hr><div id=\"divRplyFwdMsg\"><b>From:</b> A</div><p>old</p><div class=\"gmail_quote\">older</div>";
+        let parts = split_html_thread(html);
+        assert_eq!(parts.len(), 3);
+        assert_eq!(parts[0], "<p>new</p><hr>");
+        assert!(
+            parts[1].starts_with("<div id=\"divRplyFwdMsg\">") && parts[1].ends_with("<p>old</p>")
+        );
+        assert_eq!(parts[2], "<div class=\"gmail_quote\">older</div>");
+        assert_eq!(split_html_thread("<p>only</p>"), ["<p>only</p>"]);
+    }
+
+    #[test]
+    fn an_html_body_lands_in_html_and_inline_images_keep_their_content_id() {
+        let message =
+            parse_message(&json!({"body": {"contentType": "html", "content": "<p>x</p>"}}));
+        assert_eq!(
+            (message.body.as_str(), message.html.as_str()),
+            ("", "<p>x</p>")
+        );
+        let text = parse_message(&json!({"body": {"contentType": "text", "content": "x"}}));
+        assert_eq!((text.body.as_str(), text.html.as_str()), ("x", ""));
+        let attachments = parse_attachments(
+            &json!({"value": [{"id": "1", "isInline": true, "contentId": "logo@1"}]}),
+        );
+        assert_eq!(attachments[0].content_id.as_deref(), Some("logo@1"));
     }
 
     #[test]

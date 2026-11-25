@@ -1,13 +1,16 @@
 //! The Mail page: the signed-in user's Outlook mailbox through the tokens the Teams session already
 //! has. Graph reads and files mail; Outlook REST sends it (see `graph::mail`).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use app_ui_kit::render::blocks::{Block, layout_blocks};
 use app_ui_kit::render::elements::{emoji_ranges, split_highlights};
-use chrono::{Duration as Span, Local, Utc};
+use app_ui_kit::render::render_blocks;
+use chrono::{Duration as Elapsed, Local, Utc};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -21,9 +24,9 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use graph::{
     ARCHIVE, DELETED, Graph, MailAttachment, MailFolder, MailMessage, MailSummary, OutgoingMail,
-    Response, split_addresses, split_thread,
+    Response, split_addresses, split_html_thread, split_thread,
 };
-use teams_core::{Draft, MarkKind, SizeStep, TypingStyle};
+use teams_core::{Draft, MarkKind, SizeStep, Span, TypingStyle, html_to_spans};
 
 use crate::app_state::AppState;
 use crate::downloads::{self, PartFile};
@@ -41,6 +44,8 @@ const COLLAPSED_WIDTH: f32 = 48.;
 const LIST_WIDTH: f32 = 340.;
 const NOTIFIED_AT_ONCE: usize = 3;
 const ROW_HEIGHT: f32 = 50.;
+const MAX_REMOTE_IMAGE: usize = 15 * 1024 * 1024;
+const IMAGE_MAX_WIDTH: f32 = 640.;
 const ROW_LINE: f32 = 19.;
 const POLL: Duration = Duration::from_secs(60);
 const FIRST_POLL: Duration = Duration::from_secs(5);
@@ -131,6 +136,12 @@ pub struct MailPage {
     open: Option<String>,
     message: Load<(MailMessage, Vec<MailAttachment>)>,
     message_generation: u64,
+    /// Local copies of the open mail's images, by the `src` the HTML gives them.
+    images: HashMap<String, PathBuf>,
+    /// The open HTML mail laid out, newest part first.
+    html_parts: Vec<Vec<Block>>,
+    /// Remote images of the open mail left out until the user loads them.
+    blocked_images: Vec<String>,
     compose: Option<Compose>,
     search: Option<Entity<InputState>>,
     folders_hidden: bool,
@@ -170,6 +181,9 @@ impl MailPage {
             open: None,
             message: Load::Idle,
             message_generation: 0,
+            images: HashMap::new(),
+            html_parts: Vec::new(),
+            blocked_images: Vec::new(),
             compose: None,
             search: None,
             folders_hidden: false,
@@ -495,6 +509,9 @@ impl MailPage {
         self.message_generation += 1;
         let generation = self.message_generation;
         self.message = Load::Loading;
+        self.images.clear();
+        self.html_parts.clear();
+        self.blocked_images.clear();
         let unread = self.summary(&message_id).is_none_or(|mail| !mail.is_read);
         self.set_read_locally(&message_id, true);
         self.set_unread(cx);
@@ -510,27 +527,116 @@ impl MailPage {
             cx,
             move |graph| async move {
                 let message = graph.mail_message(&message_id).await?;
-                let attachments = if message.summary.has_attachments {
-                    graph.mail_attachments(&message_id).await?
-                } else {
-                    Vec::new()
-                };
+                let attachments =
+                    if message.summary.has_attachments || message.html.contains("cid:") {
+                        graph.mail_attachments(&message_id).await?
+                    } else {
+                        Vec::new()
+                    };
+                let mut images = HashMap::new();
+                for attachment in &attachments {
+                    let Some(content_id) = attachment.content_id.as_deref() else {
+                        continue;
+                    };
+                    let source = format!("cid:{content_id}");
+                    if !message.html.contains(&source) {
+                        continue;
+                    }
+                    let bytes = graph
+                        .mail_attachment_bytes(&message_id, &attachment.id)
+                        .await?;
+                    if let Some(path) = store_image(&format!("{message_id}{source}"), &bytes) {
+                        images.insert(source, path);
+                    }
+                }
                 if unread {
                     graph.set_mail_read(&message_id, true).await?;
                 }
-                Ok((message, attachments))
+                Ok(((message, attachments), images))
             },
             move |this, outcome, cx| {
                 if generation != this.message_generation {
                     return;
                 }
                 this.message = match outcome {
-                    Ok(loaded) => Load::Ready(loaded),
+                    Ok((loaded, images)) => {
+                        this.images = images;
+                        this.html_parts = Vec::new();
+                        Load::Ready(loaded)
+                    }
                     Err(reason) => Load::Failed(reason),
                 };
+                this.lay_out_html();
                 cx.notify();
             },
         );
+    }
+
+    fn lay_out_html(&mut self) {
+        let Load::Ready((message, _)) = &self.message else {
+            return;
+        };
+        let mut blocked = Vec::new();
+        self.html_parts = split_html_thread(&message.html)
+            .into_iter()
+            .map(|part| {
+                let spans = mail_spans(html_to_spans(part), &self.images, &mut blocked);
+                let mut blocks = layout_blocks(&spans);
+                while matches!(blocks.last(), Some(Block::Rule)) {
+                    blocks.pop();
+                }
+                blocks
+            })
+            .filter(|blocks| !blocks.is_empty())
+            .collect();
+        blocked.sort();
+        blocked.dedup();
+        self.blocked_images = blocked;
+    }
+
+    /// Fetches the remote images without the Teams session, so the sender learns only that the mail was opened.
+    fn load_remote_images(&mut self, cx: &mut Context<Self>) {
+        let urls = std::mem::take(&mut self.blocked_images);
+        let generation = self.message_generation;
+        let receiver = runtime::spawn(async move {
+            let Ok(client) = reqwest::Client::builder()
+                .timeout(Duration::from_secs(20))
+                .build()
+            else {
+                return Vec::new();
+            };
+            let mut stored = Vec::new();
+            for url in urls {
+                let Ok(response) = client.get(&url).send().await else {
+                    continue;
+                };
+                if !response.status().is_success() {
+                    continue;
+                }
+                if let Ok(bytes) = response.bytes().await
+                    && bytes.len() <= MAX_REMOTE_IMAGE
+                    && let Some(path) = store_image(&url, &bytes)
+                {
+                    stored.push((url, path));
+                }
+            }
+            stored
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(stored) = receiver.await else {
+                return;
+            };
+            this.update(cx, |this, cx| {
+                if generation != this.message_generation {
+                    return;
+                }
+                this.images.extend(stored);
+                this.lay_out_html();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     fn file_away(&mut self, message_id: String, destination: &'static str, cx: &mut Context<Self>) {
@@ -1141,7 +1247,7 @@ impl MailPage {
                     }),
                 ))
             });
-        let quoted = parts.map(|part| {
+        let card = || {
             v_flex()
                 .mt(px(10.))
                 .px(px(12.))
@@ -1151,28 +1257,71 @@ impl MailPage {
                 .border_l_2()
                 .border_color(theme::border_strong())
                 .bg(theme::surface_raised())
-                .child(
+        };
+        let mut content: Vec<AnyElement> = Vec::new();
+        if self.html_parts.is_empty() {
+            content.push(mail_text(newest.body, theme::text()).into_any_element());
+            content.extend(parts.map(|part| {
+                card()
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .text_size(px(12.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme::text_soft())
+                                    .child(part.from),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(theme::text_faint())
+                                    .child(part.sent),
+                            ),
+                    )
+                    .child(mail_text(part.body, theme::text_muted()))
+                    .into_any_element()
+            }));
+        } else {
+            if !self.blocked_images.is_empty() {
+                content.push(
                     h_flex()
+                        .mb(px(10.))
+                        .px(px(10.))
+                        .py(px(6.))
                         .gap(px(8.))
+                        .items_center()
+                        .rounded(px(6.))
+                        .bg(theme::surface_raised())
                         .text_size(px(12.))
+                        .text_color(theme::text_muted())
+                        .child(icon(IconName::Image, 14., theme::text_muted()))
+                        .child(div().flex_1().child(tr("mail.images_blocked")))
                         .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(theme::text_soft())
-                                .child(part.from),
+                            Button::new("mail-load-images")
+                                .outline()
+                                .compact()
+                                .label(tr("mail.load_images"))
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.load_remote_images(cx)),
+                                ),
                         )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_color(theme::text_faint())
-                                .child(part.sent),
-                        ),
-                )
-                .child(mail_text(part.body, theme::text_muted()))
-        });
+                        .into_any_element(),
+                );
+            }
+            for (index, blocks) in self.html_parts.iter().enumerate() {
+                let rendered = mail_blocks(blocks, &format!("mail-html-{index}"), cx);
+                content.push(if index == 0 {
+                    rendered
+                } else {
+                    card().child(rendered).into_any_element()
+                });
+            }
+        }
         v_flex()
             .size_full()
             .child(header)
@@ -1184,8 +1333,7 @@ impl MailPage {
                     .px(px(20.))
                     .py(px(12.))
                     .text_size(px(13.))
-                    .child(mail_text(newest.body, theme::text()))
-                    .children(quoted)
+                    .children(content)
                     .overflow_y_scrollbar(),
             )
             .into_any_element()
@@ -1383,6 +1531,172 @@ impl MailPage {
     }
 }
 
+fn image_directory() -> PathBuf {
+    directories::ProjectDirs::from("", "", store::DATA_DIR_NAME)
+        .map(|directories| directories.cache_dir().join("mail-images"))
+        .unwrap_or_else(|| std::env::temp_dir().join("rusty-teams-mail-images"))
+}
+
+/// Writes an image under a name derived from `key` and returns its path.
+fn store_image(key: &str, bytes: &[u8]) -> Option<PathBuf> {
+    use std::hash::{DefaultHasher, Hash as _, Hasher as _};
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    let directory = image_directory();
+    std::fs::create_dir_all(&directory).ok()?;
+    let path = directory.join(format!("{:016x}", hasher.finish()));
+    std::fs::write(&path, bytes).ok()?;
+    Some(path)
+}
+
+fn is_blank(spans: &[Span]) -> bool {
+    spans.iter().all(|span| match span {
+        Span::Text(text) => text.trim().is_empty(),
+        Span::LineBreak => true,
+        _ => false,
+    })
+}
+
+fn holds_blocks(spans: &[Span]) -> bool {
+    spans.iter().any(|span| match span {
+        Span::Table { .. } | Span::List { .. } | Span::Image { .. } | Span::Heading { .. } => true,
+        Span::Bold(children)
+        | Span::Italic(children)
+        | Span::Underline(children)
+        | Span::Sized(_, children)
+        | Span::Colored { children, .. }
+        | Span::Link { children, .. } => holds_blocks(children),
+        _ => false,
+    })
+}
+
+/// Mail HTML for the chat renderer: images point at local copies or are left out until loaded,
+/// and tables that only lay out the mail become plain content.
+fn mail_spans(
+    spans: Vec<Span>,
+    images: &HashMap<String, PathBuf>,
+    blocked: &mut Vec<String>,
+) -> Vec<Span> {
+    macro_rules! walk {
+        ($children:expr) => {
+            mail_spans($children, images, blocked)
+        };
+    }
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        match span {
+            Span::Image { hosted_content_url } => match images.get(&hosted_content_url) {
+                Some(path) => out.push(Span::Image {
+                    hosted_content_url: file_url(path),
+                }),
+                None if hosted_content_url.starts_with("http") => blocked.push(hosted_content_url),
+                None => {}
+            },
+            Span::Table { header, rows } => {
+                let rows: Vec<Vec<Vec<Span>>> = rows
+                    .into_iter()
+                    .map(|row| row.into_iter().map(|children| walk!(children)).collect())
+                    .collect();
+                let layout = rows
+                    .iter()
+                    .all(|row| row.iter().filter(|cell| !is_blank(cell)).count() <= 1)
+                    || rows.iter().flatten().any(|cell| holds_blocks(cell));
+                if !layout {
+                    out.push(Span::Table { header, rows });
+                    continue;
+                }
+                for cell in rows.into_iter().flatten().filter(|cell| !is_blank(cell)) {
+                    if !out.is_empty() && !matches!(out.last(), Some(Span::LineBreak)) {
+                        out.push(Span::LineBreak);
+                    }
+                    out.extend(cell);
+                }
+            }
+            Span::Bold(children) => out.push(Span::Bold(walk!(children))),
+            Span::Italic(children) => out.push(Span::Italic(walk!(children))),
+            Span::Underline(children) => out.push(Span::Underline(walk!(children))),
+            Span::Strike(children) => out.push(Span::Strike(walk!(children))),
+            Span::Sized(size, children) => out.push(Span::Sized(size, walk!(children))),
+            Span::BlockQuote(children) => out.push(Span::BlockQuote(walk!(children))),
+            Span::Colored {
+                color,
+                background,
+                children,
+            } => out.push(Span::Colored {
+                color,
+                background,
+                children: walk!(children),
+            }),
+            Span::Link { url, children } => out.push(Span::Link {
+                url,
+                children: walk!(children),
+            }),
+            Span::Heading { level, children } => out.push(Span::Heading {
+                level,
+                children: walk!(children),
+            }),
+            Span::Indent { level, children } => out.push(Span::Indent {
+                level,
+                children: walk!(children),
+            }),
+            Span::Quote {
+                message_id,
+                children,
+            } => out.push(Span::Quote {
+                message_id,
+                children: walk!(children),
+            }),
+            Span::List {
+                ordered,
+                start,
+                items,
+            } => out.push(Span::List {
+                ordered,
+                start,
+                items: items.into_iter().map(|children| walk!(children)).collect(),
+            }),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+fn file_url(path: &Path) -> String {
+    format!("file://{}", path.display())
+}
+
+/// Blocks with images drawn from their local copies; the chat renderer leaves image blocks to its caller.
+fn mail_blocks(blocks: &[Block], id: &str, cx: &App) -> AnyElement {
+    let mut column = v_flex().w_full().gap(px(6.));
+    let mut start = 0;
+    let flush = |column: Div, end: usize, start: usize| {
+        if start < end {
+            column.child(render_blocks(
+                &blocks[start..end],
+                &format!("{id}-{start}"),
+                false,
+                cx,
+            ))
+        } else {
+            column
+        }
+    };
+    for (index, block) in blocks.iter().enumerate() {
+        if let Block::Image { url } = block {
+            column = flush(column, index, start);
+            start = index + 1;
+            if let Some(path) = url.strip_prefix("file://") {
+                column = column.child(
+                    img(PathBuf::from(path))
+                        .max_w(px(IMAGE_MAX_WIDTH))
+                        .object_fit(ObjectFit::ScaleDown),
+                );
+            }
+        }
+    }
+    flush(column, blocks.len(), start).into_any_element()
+}
+
 /// A preview with line breaks would wrap even when truncated.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -1434,7 +1748,7 @@ impl Render for MailPage {
 }
 
 mod demo {
-    use super::{MailFolder, MailMessage, MailSummary, Span, Utc};
+    use super::{Elapsed, MailFolder, MailMessage, MailSummary, Utc};
 
     pub const INBOX: &str = "demo-inbox";
 
@@ -1470,7 +1784,7 @@ mod demo {
                     from.split(' ').next().unwrap_or(from).to_lowercase()
                 ),
                 preview: preview.to_owned(),
-                received: Some(Utc::now() - Span::hours(hours)),
+                received: Some(Utc::now() - Elapsed::hours(hours)),
                 is_read: read,
                 has_attachments: files,
             }
@@ -1542,6 +1856,51 @@ mod demo {
             to: vec!["demo.user@demo.example".to_owned()],
             cc: Vec::new(),
             body,
+            html: String::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    use teams_core::{Span, html_to_spans};
+
+    use super::mail_spans;
+
+    fn prepared(html: &str, images: &HashMap<String, PathBuf>) -> (Vec<Span>, Vec<String>) {
+        let mut blocked = Vec::new();
+        (
+            mail_spans(html_to_spans(html), images, &mut blocked),
+            blocked,
+        )
+    }
+
+    fn has_table(spans: &[Span]) -> bool {
+        spans.iter().any(|span| matches!(span, Span::Table { .. }))
+    }
+
+    #[test]
+    fn inline_images_point_at_their_copy_and_remote_ones_wait() {
+        let images = HashMap::from([("cid:logo".to_owned(), PathBuf::from("/tmp/logo"))]);
+        let (spans, blocked) = prepared(
+            r#"<p><img src="cid:logo"><img src="https://tracker.example/p.gif"></p>"#,
+            &images,
+        );
+        let text = format!("{spans:?}");
+        assert!(text.contains("file:///tmp/logo"));
+        assert!(!text.contains("tracker"));
+        assert_eq!(blocked, ["https://tracker.example/p.gif"]);
+    }
+
+    #[test]
+    fn layout_tables_flatten_and_data_tables_stay() {
+        let layout = r#"<table><tr><td>Hello</td></tr><tr><td>World</td></tr></table>"#;
+        assert!(!has_table(&prepared(layout, &HashMap::new()).0));
+        let data =
+            r#"<table><tr><td>Name</td><td>Value</td></tr><tr><td>a</td><td>1</td></tr></table>"#;
+        assert!(has_table(&prepared(data, &HashMap::new()).0));
     }
 }

@@ -128,6 +128,9 @@ fn opening_link_text(url: &str) -> String {
 }
 
 fn inline_image(url: &str, cx: &App) -> Option<std::path::PathBuf> {
+    if let Some(path) = url.strip_prefix("file://") {
+        return Some(path.into());
+    }
     let handle = cx.try_global::<crate::app_state::AppHandle>()?;
     let entry = handle.0.read(cx).directory.image(url)?;
     Some(entry.path.clone())
