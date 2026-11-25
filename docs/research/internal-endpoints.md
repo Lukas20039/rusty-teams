@@ -181,6 +181,15 @@ Teams on the web links (opened in a window, not requested by us): `crates/app-st
 | `127.0.0.1:9222/json/*`, `ws://127.0.0.1:9222/devtools/page/{id}` | GET, PUT, WS | `crates/browser/src/http.rs`, `crates/browser/src/browser.rs`, `crates/session/src/session.rs` | drive headless Chrome |
 | `127.0.0.1:{port}/mcp`, `/healthz` | HTTP | `crates/mcp/src/server.rs`, `crates/mcp/src/install/wsl.rs`, `crates/app-state/src/agent_api/mod.rs` | MCP server for agents |
 
+## Outlook mail (`outlook.office.com/api/v2.0/me`)
+
+Reading and filing mail use Graph (`Mail.ReadWrite`, which the Teams web app is granted). Graph `Mail.Send` is not granted, but the Teams web app's `outlook.office.com` token carries `Mail.Send`, so sending goes through Outlook REST v2.0. It accepts Graph message ids.
+
+| Path | Method | Module | Used for | R/W | Graph? |
+|---|---|---|---|---|---|
+| `/sendmail` | POST | `crates/graph/src/mail.rs` (`send_mail`) | new mail from the Mail page, saved to Sent Items | W | no - `/me/sendMail` needs `Mail.Send`, not granted to the Teams web app |
+| `/messages/{id}/reply`, `/replyall`, `/forward` | POST | `crates/graph/src/mail.rs` (`respond_to_mail`) | reply, reply all, forward with the original quoted by Outlook | W | no - the Graph equivalents need `Mail.Send` |
+
 ## Graph calls made from service crates (for completeness)
 
 `crates/chatsvc/src/calendar/reminders.rs` (`/me/reminderView`, snooze, dismiss), `crates/chatsvc/src/calendar/schedule.rs` (`/me/events`, RSVP, iCalUId lookup), `crates/chatsvc/src/recap.rs` and `crates/chatsvc/src/transcripts.rs` (`/chats/{id}/messages`, `/chats/{id}`, `/me/onlineMeetings`, attendance reports), `crates/calling/src/signaling.rs` (`/me`). These are Graph already.

@@ -42,6 +42,10 @@ const ALLOWED_PATHS: &[(&str, &str)] = &[
     ("app-base/src/demo_", "demo data"),
     ("app/src/layout_guard.rs", "layout test fixture"),
     ("graph/src/tabs.rs", "channel tab web links"),
+    (
+        "graph/src/mail.rs",
+        "Outlook REST v2.0 send, reply and forward",
+    ),
     ("app/src/inline_video.rs", "SharePoint video player link"),
     ("app/src/views/status_menu.rs", "View account web link"),
     ("app-state/src/call/week.rs", "demo join link"),
