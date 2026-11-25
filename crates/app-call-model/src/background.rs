@@ -130,6 +130,10 @@ impl BackgroundLibrary {
         self.customs.truncate(MAX_CUSTOM);
     }
 
+    pub fn remove_custom(&mut self, path: &Path) {
+        self.customs.retain(|known| known != path);
+    }
+
     pub fn needs_refresh(&self) -> bool {
         !self.refreshing
             && (self.images.is_empty()

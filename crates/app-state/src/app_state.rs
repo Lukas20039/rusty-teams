@@ -1205,6 +1205,7 @@ impl AppState {
                 launcher.set_default_mic(self.call_mic);
                 self.call_launcher = Some(launcher);
                 self.load_own_time_zone(cx);
+                self.refresh_call_backgrounds(cx);
             }
             BackendEvent::Calendar(events) => {
                 self.apply_calendar(events, cx);

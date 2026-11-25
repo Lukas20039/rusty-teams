@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use calling::camera::{DEFAULT_CAMERA_LABEL, list_cameras};
@@ -12,8 +13,10 @@ use gpui_kit::*;
 use super::rows::{Choice, caption, control_row, row, select, text_button, toggle_row};
 use crate::app_state::AppState;
 use crate::call::{BackgroundPick, CameraPreview, preview_backgrounds};
+use crate::i18n::{tr, tr_args};
 use crate::theme;
 use crate::views::prejoin_view::demo_devices;
+use app_base::downloads::reveal_in_file_manager;
 
 const FPS_TICK: Duration = Duration::from_millis(500);
 const PREVIEW_WIDTH: f32 = 288.;
@@ -75,6 +78,8 @@ pub struct DevicesView {
     audio_devices: DeviceLists,
     camera: DeviceChoice,
     background: BackgroundPick,
+    /// What the preview draws; a catalog picture waits here until it is downloaded.
+    shown_background: Option<BackgroundPick>,
     preview_blocked: bool,
     _app_subscription: Subscription,
     _release: Subscription,
@@ -82,7 +87,10 @@ pub struct DevicesView {
 
 impl DevicesView {
     pub fn new(app: Entity<AppState>, cx: &mut Context<Self>) -> Self {
-        let app_subscription = cx.observe(&app, |view, _, cx| view.sync_preview_block(cx));
+        let app_subscription = cx.observe(&app, |view, _, cx| {
+            view.sync_preview_block(cx);
+            view.sync_background(cx);
+        });
         let release = cx.on_release(|view, cx| view.preview.stop(cx));
         let (preview, mut updates) = CameraPreview::new();
         let state = app.read(cx);
@@ -129,6 +137,7 @@ impl DevicesView {
             },
             camera,
             background,
+            shown_background: None,
             preview_blocked,
             _app_subscription: app_subscription,
             _release: release,
@@ -136,6 +145,8 @@ impl DevicesView {
         view.load_devices(demo, cx);
         view.apply_background(cx);
         view.start_preview(cx);
+        view.app
+            .update(cx, |state, cx| state.refresh_call_backgrounds(cx));
         view
     }
 
@@ -202,10 +213,23 @@ impl DevicesView {
         cx.notify();
     }
 
-    fn apply_background(&self, cx: &App) {
+    /// Follows picks made elsewhere (Add image, the call menu) and downloads that finished.
+    fn sync_background(&mut self, cx: &mut Context<Self>) {
+        let pick = self.app.read(cx).call_background.clone();
+        if pick != self.background {
+            self.background = pick;
+            cx.notify();
+        }
+        if self.shown_background.as_ref() != Some(&self.background) {
+            self.apply_background(cx);
+        }
+    }
+
+    fn apply_background(&mut self, cx: &App) {
         let state = self.app.read(cx);
         if let Some(choice) = state.call_backgrounds.choice_for(&self.background) {
             self.preview.set_background(choice);
+            self.shown_background = Some(self.background.clone());
         }
     }
 
@@ -376,6 +400,7 @@ impl DevicesView {
             .iter()
             .find(|(pick, _)| *pick == self.background)
             .map_or("None".to_owned(), |(_, label)| label.clone());
+        let add_app = self.app.clone();
         let background_choices = backgrounds
             .into_iter()
             .map(|(pick, label)| {
@@ -385,6 +410,11 @@ impl DevicesView {
                     view.update(cx, |view, cx| view.select_background(pick.clone(), cx))
                 })
             })
+            .chain(std::iter::once(Choice::new(
+                tr("calls.chrome.add_image"),
+                false,
+                move |cx| add_app.update(cx, |state, cx| state.add_call_background(cx)),
+            )))
             .collect();
         let image = self.preview.image(Instant::now());
         v_flex()
@@ -432,6 +462,63 @@ impl DevicesView {
                     .text_color(theme::text_muted())
                     .child(self.preview_status()),
             )
+            .child(self.background_files(cx))
+    }
+
+    /// Where the pictures are, so they can be cleaned up: downloads in the app folder,
+    /// added pictures only linked from where the user keeps them.
+    fn background_files(&self, cx: &App) -> Div {
+        let folder = self
+            .app
+            .read(cx)
+            .call_backgrounds
+            .cache
+            .directory()
+            .to_path_buf();
+        let mut block = v_flex()
+            .px(px(super::rows::ROW_INSET))
+            .pt(px(8.))
+            .gap(px(6.))
+            .text_size(px(12.))
+            .text_color(theme::text_muted())
+            .child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(div().flex_1().min_w_0().child(tr_args(
+                        "calls.chrome.backgrounds_folder",
+                        &HashMap::from([("path".to_owned(), folder.display().to_string())]),
+                    )))
+                    .child(
+                        text_button("background-open-folder", tr("common.open")).on_click(
+                            move |_, _, _| {
+                                let _ = std::fs::create_dir_all(&folder);
+                                reveal_in_file_manager(&folder);
+                            },
+                        ),
+                    ),
+            );
+        if let BackgroundPick::Custom(path) = &self.background {
+            let (remove, removed) = (self.app.clone(), path.clone());
+            block = block.child(
+                h_flex()
+                    .gap(px(8.))
+                    .items_center()
+                    .child(div().flex_1().min_w_0().child(tr_args(
+                        "calls.chrome.background_linked",
+                        &HashMap::from([("path".to_owned(), path.display().to_string())]),
+                    )))
+                    .child(
+                        text_button("background-remove", tr("calls.chrome.remove_background"))
+                            .on_click(move |_, _, cx| {
+                                remove.update(cx, |state, cx| {
+                                    state.remove_call_background(&removed, cx)
+                                })
+                            }),
+                    ),
+            );
+        }
+        block
     }
 
     fn effect_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
