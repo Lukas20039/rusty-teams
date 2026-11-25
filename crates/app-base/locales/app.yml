@@ -1299,6 +1299,15 @@ calls:
     add_image:
       en: Add image...
       de: Bild hinzufügen...
+    backgrounds_folder:
+      en: "Downloaded backgrounds are kept in %{path}"
+      de: "Heruntergeladene Hintergründe liegen in %{path}"
+    background_linked:
+      en: "This picture stays in %{path} and is only linked here"
+      de: "Dieses Bild bleibt in %{path} und ist hier nur verknüpft"
+    remove_background:
+      en: Remove from list
+      de: Aus der Liste entfernen
   prejoin:
     camera_off:
       en: Your camera is off
