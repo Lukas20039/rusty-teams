@@ -177,16 +177,12 @@ pub fn frames_per_second(frames: u64, elapsed: Duration) -> f32 {
 }
 
 pub fn preview_backgrounds(library: &BackgroundLibrary) -> Vec<(BackgroundPick, String)> {
-    let defaults = library
-        .shown()
-        .iter()
-        .filter(|image| library.cached_image(&image.id).is_some())
-        .map(|image| {
-            (
-                BackgroundPick::Default(image.id.clone()),
-                image.name.clone(),
-            )
-        });
+    let defaults = library.shown().iter().map(|image| {
+        (
+            BackgroundPick::Default(image.id.clone()),
+            image.name.clone(),
+        )
+    });
     let customs = library
         .customs
         .iter()

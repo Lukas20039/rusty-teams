@@ -87,6 +87,10 @@ pub struct BackgroundCache {
 }
 
 impl BackgroundCache {
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
     pub fn new(directory: PathBuf) -> Self {
         BackgroundCache { directory }
     }

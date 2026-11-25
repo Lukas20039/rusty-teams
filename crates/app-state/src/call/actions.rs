@@ -1095,6 +1095,7 @@ impl AppState {
                     state.send_call_command(CallCommand::SetBackground(
                         calling::BackgroundChoice::Image(path),
                     ));
+                    cx.notify();
                 }
                 Some(_) => {}
                 None => state.raise_notice(
@@ -1134,6 +1135,16 @@ impl AppState {
             .ok();
         })
         .detach();
+    }
+
+    /// Forgets an added picture; the file itself stays where the user keeps it.
+    pub fn remove_call_background(&mut self, path: &std::path::Path, cx: &mut Context<Self>) {
+        self.call_backgrounds.remove_custom(path);
+        save_custom_backgrounds(&self.store, &self.call_backgrounds.customs);
+        if self.call_background == BackgroundPick::Custom(path.to_path_buf()) {
+            self.set_call_background(BackgroundPick::None, cx);
+        }
+        cx.notify();
     }
 
     pub fn add_call_background(&mut self, cx: &mut Context<Self>) {
