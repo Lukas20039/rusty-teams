@@ -65,6 +65,10 @@ impl<R: Remote> SyncEngine<R> {
         self.remote.drive_root(site_id).await
     }
 
+    pub async fn team_library_root(&self, team_id: &str) -> Result<DriveFolder> {
+        self.remote.team_drive_root(team_id).await
+    }
+
     pub async fn picker_folder(&self, folder: &DriveFolder) -> Result<Vec<DriveEntry>> {
         let mut entries = self.remote.list_children(folder).await?;
         entries.sort_by(|first, second| {

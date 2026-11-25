@@ -2105,6 +2105,9 @@ onedrive:
   shared:
     en: Shared
     de: Geteilt
+  libraries:
+    en: Libraries
+    de: Bibliotheken
   open_web:
     en: Open in OneDrive
     de: In OneDrive öffnen

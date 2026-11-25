@@ -203,6 +203,10 @@ pub fn my_drive() -> String {
     format!("{GRAPH}/v1.0/me/drive?$select=id")
 }
 
+pub fn group_drive(group_id: &str) -> String {
+    format!("{GRAPH}/v1.0/groups/{}/drive?$select=id", segment(group_id))
+}
+
 pub fn site_drive(site_id: &str) -> String {
     format!("{GRAPH}/v1.0/sites/{}/drive?$select=id", segment(site_id))
 }

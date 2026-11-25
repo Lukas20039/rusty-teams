@@ -8,7 +8,7 @@ use gpui_kit::component::h_flex;
 use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
-use teams_core::{CloudFile, DriveEntry, DriveFolder};
+use teams_core::{CloudFile, DriveEntry, DriveFolder, QuickSite};
 
 use crate::app_state::AppState;
 use crate::channel_files::{Crumb, LibraryPath, library_file, sorted_entries};
@@ -22,24 +22,72 @@ use crate::views::attachment_tray::{display_name, read_attachment};
 use crate::views::shared_tab::{LibraryView, Listing, SharedCommand, SharedRun, render_library};
 
 const DEMO_DRIVE: &str = "onedrive";
+/// Library rows carry their kind in `drive_id` and the team or site id in `id`.
+const TEAM_LIBRARY: &str = "team-library";
+const SITE_LIBRARY: &str = "site-library";
+const DEMO_TEAMS: [(&str, &str); 2] = [
+    ("demo-team-company", "Company"),
+    ("demo-team-product", "Product"),
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
     Recent,
     MyFiles,
     Shared,
+    Libraries,
 }
 
 impl Section {
-    const ALL: [Section; 3] = [Section::Recent, Section::MyFiles, Section::Shared];
+    const ALL: [Section; 4] = [
+        Section::Recent,
+        Section::MyFiles,
+        Section::Shared,
+        Section::Libraries,
+    ];
 
     fn label(self) -> String {
         match self {
             Section::Recent => tr("onedrive.recent"),
             Section::MyFiles => tr("onedrive.my_files"),
             Section::Shared => tr("onedrive.shared"),
+            Section::Libraries => tr("onedrive.libraries"),
         }
     }
+}
+
+fn library_row(kind: &str, id: &str, name: &str) -> DriveEntry {
+    DriveEntry {
+        drive_id: kind.to_owned(),
+        id: id.to_owned(),
+        name: name.to_owned(),
+        web_url: String::new(),
+        size: 0,
+        modified_at: None,
+        modified_by: None,
+        child_count: Some(0),
+        download_url: None,
+    }
+}
+
+fn is_library(entry: &DriveEntry) -> bool {
+    entry.drive_id == TEAM_LIBRARY || entry.drive_id == SITE_LIBRARY
+}
+
+/// The user's teams' libraries, then the sites of recently opened files that are not one of those teams.
+pub fn library_rows(teams: &[(String, String)], sites: &[QuickSite]) -> Vec<DriveEntry> {
+    let team_rows = teams
+        .iter()
+        .map(|(id, name)| library_row(TEAM_LIBRARY, id, name));
+    let site_rows = sites
+        .iter()
+        .filter(|site| {
+            !teams
+                .iter()
+                .any(|(_, name)| name.eq_ignore_ascii_case(&site.name))
+        })
+        .map(|site| library_row(SITE_LIBRARY, &site.id, &site.name));
+    team_rows.chain(site_rows).collect()
 }
 
 /// A recently opened file as a library row; it has no drive ids when Graph only knows its link.
@@ -134,6 +182,10 @@ impl OneDrivePage {
                     cx.open_url(&entry.web_url);
                     return;
                 }
+                if is_library(&entry) {
+                    self.open_library(entry, cx);
+                    return;
+                }
                 match self.path.as_mut() {
                     Some(path) => path.enter(&entry),
                     None => {
@@ -148,7 +200,7 @@ impl OneDrivePage {
                 self.load(cx);
             }
             SharedCommand::OpenInBrowser(index) => {
-                if let Some(entry) = self.entry(index) {
+                if let Some(entry) = self.entry(index).filter(|entry| !entry.web_url.is_empty()) {
                     cx.open_url(&entry.web_url);
                 }
             }
@@ -158,7 +210,7 @@ impl OneDrivePage {
                 }
             }
             SharedCommand::CopyLink(index) => {
-                if let Some(entry) = self.entry(index) {
+                if let Some(entry) = self.entry(index).filter(|entry| !entry.web_url.is_empty()) {
                     cx.write_to_clipboard(ClipboardItem::new_string(entry.web_url));
                     self.notice(tr("onedrive.link_copied"), cx);
                 }
@@ -194,6 +246,13 @@ impl OneDrivePage {
         cx.notify();
         let state = self.app.read(cx);
         let (demo, engine) = (state.mode.demo, state.engine.clone());
+        let teams: Vec<(String, String)> = state
+            .sidebar
+            .teams
+            .iter()
+            .filter(|team| !team.hidden)
+            .map(|team| (team.team.id.clone(), team.team.name.clone()))
+            .collect();
         let (section, folder) = (
             self.section,
             self.path.as_ref().map(|path| path.current().clone()),
@@ -231,8 +290,21 @@ impl OneDrivePage {
                         .collect(),
                 ),
                 (Section::Shared, None) => (None, engine.picker_shared().await?),
+                (Section::Libraries, None) => {
+                    let sites = engine.picker_sites().await.unwrap_or_default();
+                    (None, library_rows(&teams, &sites))
+                }
             })
         });
+        self.finish_when(generation, receiver, cx);
+    }
+
+    fn finish_when<E: std::fmt::Display + 'static>(
+        &self,
+        generation: u64,
+        receiver: impl Future<Output = Result<Result<Loaded, teams_core::Error>, E>> + 'static,
+        cx: &mut Context<Self>,
+    ) {
         cx.spawn(async move |this, cx| {
             let outcome = match receiver.await {
                 Ok(Ok(loaded)) => Ok(loaded),
@@ -243,6 +315,46 @@ impl OneDrivePage {
                 .ok();
         })
         .detach();
+    }
+
+    fn open_library(&mut self, library: DriveEntry, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let generation = self.generation;
+        self.listing = Listing::Loading;
+        self.new_folder_open = false;
+        cx.notify();
+        let state = self.app.read(cx);
+        let (demo, engine) = (state.mode.demo, state.engine.clone());
+        if demo {
+            let root = self.demo.root(&library.id, &library.name);
+            let entries = self.demo.children(&root.id);
+            let crumb = Crumb {
+                name: library.name,
+                folder: root.folder(),
+                web_url: root.web_url,
+            };
+            self.finish_load(generation, Ok((Some(crumb), entries)), cx);
+            return;
+        }
+        let Some(engine) = engine else {
+            self.listing = Listing::Failed(tr("onedrive.not_connected"));
+            return;
+        };
+        let receiver = runtime::spawn(async move {
+            let root = if library.drive_id == TEAM_LIBRARY {
+                engine.team_library_root(&library.id).await?
+            } else {
+                engine.picker_root(Some(&library.id)).await?
+            };
+            let entries = engine.library_children(&root).await?;
+            let crumb = Crumb {
+                name: library.name,
+                folder: root,
+                web_url: root_web_url(&entries),
+            };
+            Ok::<Loaded, teams_core::Error>((Some(crumb), entries))
+        });
+        self.finish_when(generation, receiver, cx);
     }
 
     fn demo_listing(&mut self, section: Section, folder: Option<DriveFolder>) -> Loaded {
@@ -272,6 +384,13 @@ impl OneDrivePage {
                 None,
                 entries.into_iter().filter(DriveEntry::is_folder).collect(),
             ),
+            Section::Libraries => {
+                let teams: Vec<(String, String)> = DEMO_TEAMS
+                    .iter()
+                    .map(|(id, name)| ((*id).to_owned(), (*name).to_owned()))
+                    .collect();
+                (None, library_rows(&teams, &[]))
+            }
         }
     }
 
@@ -574,6 +693,7 @@ impl Render for OneDrivePage {
                     lead: Some(self.section_switch(cx)),
                     web_label: &web_label,
                     empty: &empty,
+                    hide_sizes: self.section == Section::Libraries && self.path.is_none(),
                 },
                 &run,
             ))
@@ -582,9 +702,9 @@ impl Render for OneDrivePage {
 
 #[cfg(test)]
 mod tests {
-    use teams_core::{CloudFile, DriveEntry};
+    use teams_core::{CloudFile, DriveEntry, QuickSite};
 
-    use super::{recent_entry, root_web_url};
+    use super::{SITE_LIBRARY, TEAM_LIBRARY, library_rows, recent_entry, root_web_url};
 
     fn entry(web_url: &str) -> DriveEntry {
         recent_entry(
@@ -618,5 +738,27 @@ mod tests {
             "https://tenant-my.sharepoint.com/personal/me/Documents"
         );
         assert_eq!(root_web_url(&[]), "");
+    }
+
+    #[test]
+    fn libraries_list_teams_then_sites_that_are_not_a_team() {
+        let teams = [("t1".to_owned(), "Company".to_owned())];
+        let sites = [
+            QuickSite {
+                id: "s1".to_owned(),
+                name: "company".to_owned(),
+            },
+            QuickSite {
+                id: "s2".to_owned(),
+                name: "Marketing".to_owned(),
+            },
+        ];
+        let rows = library_rows(&teams, &sites);
+        let kinds: Vec<(&str, &str)> = rows
+            .iter()
+            .map(|row| (row.drive_id.as_str(), row.id.as_str()))
+            .collect();
+        assert_eq!(kinds, [(TEAM_LIBRARY, "t1"), (SITE_LIBRARY, "s2")]);
+        assert!(rows.iter().all(DriveEntry::is_folder));
     }
 }

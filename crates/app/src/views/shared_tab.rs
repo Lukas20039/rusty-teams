@@ -77,6 +77,8 @@ pub struct LibraryView<'a> {
     pub lead: Option<AnyElement>,
     pub web_label: &'a str,
     pub empty: &'a str,
+    /// Rows are whole libraries, which have no size to show.
+    pub hide_sizes: bool,
 }
 
 pub struct MessagesView<'a> {
@@ -232,7 +234,7 @@ fn column(width: Option<f32>) -> Div {
     }
 }
 
-fn column_header() -> Div {
+fn column_header(hide_sizes: bool) -> Div {
     h_flex()
         .w_full()
         .flex_none()
@@ -246,7 +248,7 @@ fn column_header() -> Div {
         .child(column(None).pl(px(BADGE_SIZE + 8.)).child("Name"))
         .child(column(Some(MODIFIED_WIDTH)).child("Modified"))
         .child(column(Some(MODIFIED_BY_WIDTH)).child("Modified by"))
-        .child(column(Some(SIZE_WIDTH)).child("Size"))
+        .child(column(Some(SIZE_WIDTH)).when(!hide_sizes, |column| column.child("Size")))
 }
 
 pub(crate) fn entry_badge(entry: &DriveEntry) -> Div {
@@ -273,6 +275,7 @@ fn entry_row(
     index: usize,
     entry: &DriveEntry,
     download: Option<String>,
+    hide_size: bool,
     run: &SharedRun,
 ) -> impl IntoElement {
     let folder = entry.is_folder();
@@ -313,7 +316,7 @@ fn entry_row(
         .child(name)
         .child(column(Some(MODIFIED_WIDTH)).child(modified_text(entry)))
         .child(column(Some(MODIFIED_BY_WIDTH)).child(entry.modified_by.clone().unwrap_or_default()))
-        .child(column(Some(SIZE_WIDTH)).child(size_label(entry)))
+        .child(column(Some(SIZE_WIDTH)).when(!hide_size, |column| column.child(size_label(entry))))
         .context_menu(move |popup, _, _| {
             let item = |label: &'static str, glyph: IconName, command: SharedCommand| {
                 let run = menu_run.clone();
@@ -493,7 +496,7 @@ pub fn render_library(view: LibraryView, run: &SharedRun) -> AnyElement {
                     .download_states
                     .get(index)
                     .and_then(|state| download_label(state.as_ref()));
-                entry_row(index, entry, download, run)
+                entry_row(index, entry, download, view.hide_sizes, run)
             }))
             .into_any_element(),
     };
@@ -509,7 +512,7 @@ pub fn render_library(view: LibraryView, run: &SharedRun) -> AnyElement {
                 .text_color(theme::accent_text())
                 .child(status.to_owned())
         }))
-        .child(column_header())
+        .child(column_header(view.hide_sizes))
         .child(body)
         .into_any_element()
 }

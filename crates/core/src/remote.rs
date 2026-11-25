@@ -272,6 +272,10 @@ pub trait Remote {
         Err(Error::Unsupported("drive root"))
     }
 
+    async fn team_drive_root(&self, _team_id: &str) -> Result<DriveFolder> {
+        Err(Error::Unsupported("team drive root"))
+    }
+
     async fn cloud_file_reference(&self, _file: &CloudFile) -> Result<UploadedFile> {
         Err(Error::Unsupported("cloud files"))
     }
@@ -1146,6 +1150,10 @@ impl Remote for Graph {
 
     async fn drive_root(&self, site_id: Option<&str>) -> Result<DriveFolder> {
         Ok(Graph::drive_root(self, site_id).await?)
+    }
+
+    async fn team_drive_root(&self, team_id: &str) -> Result<DriveFolder> {
+        Ok(Graph::team_drive_root(self, team_id).await?)
     }
 
     async fn cloud_file_reference(&self, file: &CloudFile) -> Result<UploadedFile> {

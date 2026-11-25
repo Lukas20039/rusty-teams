@@ -213,8 +213,17 @@ impl Graph {
 
     /// The root folder of the user's OneDrive, or of a site's document library.
     pub async fn drive_root(&self, site_id: Option<&str>) -> Result<DriveFolder> {
-        let url = site_id.map_or_else(urls::my_drive, urls::site_drive);
-        let drive = self.get(&url, &Scope::graph(FILES_SCOPE)).await?;
+        self.root_of(&site_id.map_or_else(urls::my_drive, urls::site_drive))
+            .await
+    }
+
+    /// The root folder of a team's document library.
+    pub async fn team_drive_root(&self, team_id: &str) -> Result<DriveFolder> {
+        self.root_of(&urls::group_drive(team_id)).await
+    }
+
+    async fn root_of(&self, url: &str) -> Result<DriveFolder> {
+        let drive = self.get(url, &Scope::graph(FILES_SCOPE)).await?;
         let drive_id = drive["id"]
             .as_str()
             .ok_or_else(|| Error::Decode("a drive without an id".into()))?;

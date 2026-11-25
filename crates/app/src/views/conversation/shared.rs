@@ -286,6 +286,7 @@ impl ConversationView {
                         lead: None,
                         web_label: "Open in SharePoint \u{2197}",
                         empty: EMPTY_LIBRARY,
+                        hide_sizes: false,
                     },
                     &run,
                 )
