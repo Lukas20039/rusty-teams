@@ -1210,13 +1210,14 @@ impl PopupMenu {
     fn update_submenu_menu_anchor(&mut self, window: &Window) {
         let bounds = self.bounds;
         let max_width = self.max_width();
-        let (anchor, left) = if max_width + bounds.origin.x > window.bounds().size.width {
+        let viewport = window.viewport_size();
+        let (anchor, left) = if max_width + bounds.origin.x > viewport.width {
             (Anchor::TopRight, -px(16.))
         } else {
             (Anchor::TopLeft, bounds.size.width - px(8.))
         };
 
-        let is_bottom_pos = bounds.origin.y + bounds.size.height > window.bounds().size.height;
+        let is_bottom_pos = bounds.origin.y + bounds.size.height > viewport.height;
         self.submenu_anchor = if is_bottom_pos {
             (anchor.other_side_along(gpui::Axis::Vertical), left)
         } else {
