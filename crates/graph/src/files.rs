@@ -157,6 +157,13 @@ fn range_header(start: u64, end: Option<u64>) -> String {
 }
 
 /// First byte the server still wants, from `nextExpectedRanges` (`["1310720-"]`).
+fn upload_url_of(body: &Value) -> Result<String> {
+    body.get("uploadUrl")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .ok_or_else(|| Error::Upload("no upload URL in the answer".into()))
+}
+
 pub fn next_expected_start(body: &Value) -> Option<u64> {
     let range = body
         .get("nextExpectedRanges")?
@@ -296,12 +303,64 @@ impl Graph {
                 Some(json!({"item": {"@microsoft.graph.conflictBehavior": "fail"}})),
             )
             .await?;
-        let upload_url = created
-            .body
-            .get("uploadUrl")
-            .and_then(Value::as_str)
-            .ok_or_else(|| Error::Upload("no upload URL in the answer".into()))?
-            .to_owned();
+        let mut uploaded = self
+            .send_chunks(upload_url_of(&created.body)?, bytes, progress, &scope)
+            .await?;
+        uploaded.name = shown_name.to_owned();
+        Ok(uploaded)
+    }
+
+    /// Replaces the content of an existing file, unless it changed online since `etag` was read.
+    pub async fn replace_file(
+        &self,
+        drive_id: &str,
+        item_id: &str,
+        bytes: &[u8],
+        etag: &str,
+    ) -> Result<UploadedFile> {
+        if bytes.is_empty() {
+            return Err(Error::EmptyUpload);
+        }
+        let scope = Scope::graph(FILES_SCOPE);
+        let mut request = Request::with_body(
+            Method::Post,
+            urls::item_upload_session(drive_id, item_id),
+            json!({"item": {"@microsoft.graph.conflictBehavior": "replace"}}),
+        );
+        request
+            .headers
+            .push(("If-Match".to_owned(), etag.to_owned()));
+        let created = match self.session().send(request, &scope).await {
+            Err(session::Error::Api { status: 412, .. }) => return Err(Error::ChangedOnline),
+            other => other?,
+        };
+        self.send_chunks(upload_url_of(&created.body)?, bytes, &|_| {}, &scope)
+            .await
+    }
+
+    pub async fn drive_item_etag(&self, drive_id: &str, item_id: &str) -> Result<String> {
+        let answer = self
+            .session()
+            .request(
+                Method::Get,
+                &urls::drive_item_etag(drive_id, item_id),
+                &Scope::graph(FILES_SCOPE),
+                None,
+            )
+            .await?;
+        answer.body["eTag"]
+            .as_str()
+            .map(str::to_owned)
+            .ok_or_else(|| Error::Decode("a drive item without an eTag".into()))
+    }
+
+    async fn send_chunks(
+        &self,
+        upload_url: String,
+        bytes: &[u8],
+        progress: &(dyn Fn(u8) + Send + Sync),
+        scope: &Scope,
+    ) -> Result<UploadedFile> {
         let mut guard = SessionGuard {
             session: self.session().clone(),
             url: upload_url.clone(),
@@ -319,13 +378,11 @@ impl Graph {
                 vec![("Content-Range".to_owned(), content_range(start, end, total))],
                 STANDARD.encode(&bytes[start as usize..=end as usize]),
             );
-            match self.session().send(request, &scope).await {
+            match self.session().send(request, scope).await {
                 Ok(answer) if matches!(answer.status, 200 | 201) => {
                     guard.disarm();
                     progress(100);
-                    let mut uploaded = finished_item(answer.body)?;
-                    uploaded.name = shown_name.to_owned();
-                    return Ok(uploaded);
+                    return finished_item(answer.body);
                 }
                 Ok(_) => {
                     failures = 0;
@@ -337,7 +394,7 @@ impl Graph {
                     if failures > MAX_CHUNK_RETRIES {
                         return Err(error.into());
                     }
-                    if let Some(next) = self.resume_offset(&upload_url, &scope).await {
+                    if let Some(next) = self.resume_offset(&upload_url, scope).await {
                         offset = next.min(total);
                     }
                 }

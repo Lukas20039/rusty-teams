@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
@@ -26,6 +26,7 @@ use crate::views::file_preview::{
     self, Decoded, MAX_PREVIEW_BYTES, PreviewKind, pages_view, preview_kind, render_image,
     text_view,
 };
+use crate::views::local_edit::{Stamp, ready_to_upload, stamp, working_copy};
 use crate::views::shared_tab::{LibraryView, Listing, SharedCommand, SharedRun, render_library};
 
 const DEMO_DRIVE: &str = "onedrive";
@@ -135,6 +136,24 @@ struct Preview {
     body: PreviewBody,
 }
 
+const EDIT_POLL: Duration = Duration::from_secs(2);
+
+/// A library file open in a local app; saves go back to the library.
+struct EditSession {
+    entry: DriveEntry,
+    path: PathBuf,
+    etag: String,
+    uploaded: Stamp,
+    previous: Option<Stamp>,
+    saving: bool,
+}
+
+fn edit_root() -> PathBuf {
+    app_base::support::local_data_dir()
+        .unwrap_or_else(downloads::downloads_directory)
+        .join("onedrive-edit")
+}
+
 pub struct OneDrivePage {
     app: Entity<AppState>,
     section: Section,
@@ -149,6 +168,8 @@ pub struct OneDrivePage {
     downloading: Option<String>,
     preview: Option<Preview>,
     preview_generation: u64,
+    edits: Vec<EditSession>,
+    polling: bool,
     demo: DemoLibrary,
     _subscriptions: Vec<Subscription>,
 }
@@ -169,6 +190,8 @@ impl OneDrivePage {
             downloading: None,
             preview: None,
             preview_generation: 0,
+            edits: Vec::new(),
+            polling: false,
             demo: DemoLibrary::default(),
             _subscriptions: Vec::new(),
         }
@@ -727,6 +750,161 @@ impl OneDrivePage {
         cx.notify();
     }
 
+    fn edit_locally(&mut self, entry: DriveEntry, cx: &mut Context<Self>) {
+        if let Some(edit) = self.edits.iter().find(|edit| edit.entry.id == entry.id) {
+            cx.open_with_system(&edit.path);
+            return;
+        }
+        let state = self.app.read(cx);
+        let (demo, engine) = (state.mode.demo, state.engine.clone());
+        if demo || entry.drive_id.is_empty() {
+            self.notice(tr("onedrive.edit_unavailable"), cx);
+            return;
+        }
+        let Some(engine) = engine else {
+            return;
+        };
+        let path = working_copy(&edit_root(), &entry.id, &entry.name);
+        let file = library_file(&entry, self.listed_at, Instant::now());
+        let (drive_id, item_id, target) = (entry.drive_id.clone(), entry.id.clone(), path.clone());
+        let fetched = runtime::spawn(async move {
+            let etag = engine.library_file_etag(&drive_id, &item_id).await?;
+            let mut bytes = Vec::new();
+            engine
+                .download_library_file(
+                    &file,
+                    |chunk| {
+                        bytes.extend_from_slice(chunk);
+                        Ok(())
+                    },
+                    |_| {},
+                )
+                .await?;
+            if let Some(folder) = target.parent() {
+                std::fs::create_dir_all(folder)?;
+            }
+            std::fs::write(&target, bytes)?;
+            Ok::<String, teams_core::Error>(etag)
+        });
+        self.downloading = Some(entry.name.clone());
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let outcome = match fetched.await {
+                Ok(Ok(etag)) => Ok(etag),
+                Ok(Err(error)) => Err(short_error(&error)),
+                Err(error) => Err(short_error(&error)),
+            };
+            this.update(cx, |this, cx| {
+                this.downloading = None;
+                match (outcome, stamp(&path)) {
+                    (Ok(etag), Some(uploaded)) => {
+                        cx.open_with_system(&path);
+                        this.edits.push(EditSession {
+                            entry,
+                            path,
+                            etag,
+                            uploaded,
+                            previous: None,
+                            saving: false,
+                        });
+                        this.start_polling(cx);
+                    }
+                    (Err(reason), _) => this.notice(format!("{}: {reason}", entry.name), cx),
+                    (Ok(_), None) => this.notice(entry.name.clone(), cx),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// ponytail: polls the working copies every 2 s for the app's lifetime; use file events if many files are edited at once.
+    fn start_polling(&mut self, cx: &mut Context<Self>) {
+        if self.polling {
+            return;
+        }
+        self.polling = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(EDIT_POLL).await;
+                if this.update(cx, |this, cx| this.check_edits(cx)).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    fn check_edits(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = self.app.read(cx).engine.clone() else {
+            return;
+        };
+        for index in 0..self.edits.len() {
+            let edit = &mut self.edits[index];
+            let Some(now) = stamp(&edit.path).filter(|_| !edit.saving) else {
+                continue;
+            };
+            let ready = ready_to_upload(edit.uploaded, edit.previous, now);
+            edit.previous = Some(now);
+            if !ready {
+                continue;
+            }
+            edit.saving = true;
+            let (engine, path, etag) = (engine.clone(), edit.path.clone(), edit.etag.clone());
+            let (drive_id, item_id) = (edit.entry.drive_id.clone(), edit.entry.id.clone());
+            let saved = runtime::spawn(async move {
+                let bytes = std::fs::read(&path)?;
+                engine
+                    .save_library_file(&drive_id, &item_id, &bytes, &etag)
+                    .await
+            });
+            let item = edit.entry.id.clone();
+            cx.spawn(async move |this, cx| {
+                let outcome = saved.await;
+                this.update(cx, |this, cx| this.finish_save(&item, now, outcome, cx))
+                    .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn finish_save<E: std::fmt::Display>(
+        &mut self,
+        item_id: &str,
+        saved: Stamp,
+        outcome: Result<Result<String, teams_core::Error>, E>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(index) = self.edits.iter().position(|edit| edit.entry.id == item_id) else {
+            return;
+        };
+        let edit = &mut self.edits[index];
+        edit.saving = false;
+        // A failed upload waits for the next save instead of retrying every poll.
+        edit.uploaded = saved;
+        let name = edit.entry.name.clone();
+        let message = match outcome {
+            Ok(Ok(etag)) => {
+                edit.etag = etag;
+                format!("{}: {name}", tr("onedrive.saved_online"))
+            }
+            Ok(Err(teams_core::Error::Graph(graph::Error::ChangedOnline))) => {
+                let edit = self.edits.remove(index);
+                format!(
+                    "{}: {name}. {} {}",
+                    tr("onedrive.changed_online"),
+                    tr("onedrive.your_copy"),
+                    edit.path.display()
+                )
+            }
+            Ok(Err(error)) => format!("{name}: {}", short_error(&error)),
+            Err(error) => format!("{name}: {}", short_error(&error)),
+        };
+        self.notice(message, cx);
+        cx.notify();
+    }
+
     fn close_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(Preview {
             body: PreviewBody::Pages(pages, _),
@@ -770,6 +948,17 @@ impl OneDrivePage {
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme::text())
                     .child(entry.name.clone()),
+            )
+            .child(
+                Button::new("onedrive-preview-edit")
+                    .ghost()
+                    .compact()
+                    .icon(IconName::Pencil)
+                    .label(tr("onedrive.edit_locally"))
+                    .on_click(cx.listener({
+                        let entry = entry.clone();
+                        move |this, _, _, cx| this.edit_locally(entry.clone(), cx)
+                    })),
             )
             .child(
                 Button::new("onedrive-preview-download")
@@ -877,9 +1066,16 @@ impl Render for OneDrivePage {
             view.update(cx, |this, cx| this.run(command, window, cx))
                 .ok();
         });
+        let editing = self
+            .edits
+            .iter()
+            .map(|edit| edit.entry.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
         let status = match (&self.downloading, self.uploads_running) {
             (Some(name), _) => Some(format!("{} {name} …", tr("onedrive.downloading"))),
-            (None, 0) => None,
+            (None, 0) if editing.is_empty() => None,
+            (None, 0) => Some(format!("{}: {editing}", tr("onedrive.editing"))),
             (None, running) => Some(format!("{} ({running}) …", tr("onedrive.uploading"))),
         };
         let web_label = format!("{} \u{2197}", tr("onedrive.open_web"));

@@ -18,4 +18,6 @@ pub enum Error {
     Upload(String),
     #[error("download failed: {0}")]
     Download(String),
+    #[error("the file changed online since it was opened")]
+    ChangedOnline,
 }

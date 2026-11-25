@@ -70,6 +70,27 @@ impl<R: Remote> SyncEngine<R> {
         self.remote.drive_item_pdf(drive_id, item_id).await
     }
 
+    /// The version tag of a library file, to notice later whether it changed online.
+    pub async fn library_file_etag(&self, drive_id: &str, item_id: &str) -> Result<String> {
+        self.remote.drive_item_etag(drive_id, item_id).await
+    }
+
+    /// Uploads a locally edited copy over the library file and returns its new version tag;
+    /// fails with `ChangedOnline` when someone changed the file since `etag`.
+    pub async fn save_library_file(
+        &self,
+        drive_id: &str,
+        item_id: &str,
+        bytes: &[u8],
+        etag: &str,
+    ) -> Result<String> {
+        Ok(self
+            .remote
+            .replace_file(drive_id, item_id, bytes, etag)
+            .await?
+            .etag)
+    }
+
     pub async fn team_library_root(&self, team_id: &str) -> Result<DriveFolder> {
         self.remote.team_drive_root(team_id).await
     }

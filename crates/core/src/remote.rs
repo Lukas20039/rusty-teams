@@ -296,6 +296,20 @@ pub trait Remote {
         Err(Error::Unsupported("PDF conversion"))
     }
 
+    async fn drive_item_etag(&self, _drive_id: &str, _item_id: &str) -> Result<String> {
+        Err(Error::Unsupported("file versions"))
+    }
+
+    async fn replace_file(
+        &self,
+        _drive_id: &str,
+        _item_id: &str,
+        _bytes: &[u8],
+        _etag: &str,
+    ) -> Result<UploadedFile> {
+        Err(Error::Unsupported("replacing a file"))
+    }
+
     async fn download_range(
         &self,
         _download_url: &str,
@@ -1178,6 +1192,20 @@ impl Remote for Graph {
 
     async fn drive_item_pdf(&self, drive_id: &str, item_id: &str) -> Result<Vec<u8>> {
         Ok(Graph::drive_item_pdf(self, drive_id, item_id).await?)
+    }
+
+    async fn drive_item_etag(&self, drive_id: &str, item_id: &str) -> Result<String> {
+        Ok(Graph::drive_item_etag(self, drive_id, item_id).await?)
+    }
+
+    async fn replace_file(
+        &self,
+        drive_id: &str,
+        item_id: &str,
+        bytes: &[u8],
+        etag: &str,
+    ) -> Result<UploadedFile> {
+        Ok(Graph::replace_file(self, drive_id, item_id, bytes, etag).await?)
     }
 
     async fn download_range(

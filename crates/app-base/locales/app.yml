@@ -2138,6 +2138,24 @@ onedrive:
   back:
     en: Back
     de: Zurück
+  edit_locally:
+    en: Edit locally
+    de: Lokal bearbeiten
+  edit_unavailable:
+    en: Only files in a library can be edited locally
+    de: Lokal bearbeiten geht nur mit Dateien aus einer Bibliothek
+  editing:
+    en: Editing locally, saves go back to OneDrive
+    de: Wird lokal bearbeitet, Speichern lädt zurück nach OneDrive
+  saved_online:
+    en: Saved to OneDrive
+    de: In OneDrive gespeichert
+  changed_online:
+    en: Not saved, the file changed online meanwhile
+    de: Nicht gespeichert, die Datei wurde inzwischen online geändert
+  your_copy:
+    en: Your version stays at
+    de: Deine Version liegt unter
   download:
     en: Download
     de: Herunterladen

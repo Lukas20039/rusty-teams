@@ -195,6 +195,14 @@ pub fn drive_item(drive_id: &str, item_id: &str) -> String {
     )
 }
 
+pub fn drive_item_etag(drive_id: &str, item_id: &str) -> String {
+    format!("{}?$select=eTag", drive_item(drive_id, item_id))
+}
+
+pub fn item_upload_session(drive_id: &str, item_id: &str) -> String {
+    format!("{}/createUploadSession", drive_item(drive_id, item_id))
+}
+
 pub fn drive_item_pdf(drive_id: &str, item_id: &str) -> String {
     format!("{}/content?format=pdf", drive_item(drive_id, item_id))
 }
