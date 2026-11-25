@@ -118,6 +118,7 @@ impl AppState {
             join,
         });
         self.new_chat = false;
+        self.refresh_call_backgrounds(cx);
         cx.notify();
     }
 
