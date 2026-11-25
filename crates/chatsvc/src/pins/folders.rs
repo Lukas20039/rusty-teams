@@ -250,8 +250,13 @@ fn reordered(order: &[String], folder_id: &str, target_folder_id: &str) -> Resul
     Ok(reordered)
 }
 
-fn is_full_state(body: &Value) -> bool {
+/// A move answers with only the changed folders and still says `isPartialResponse: false`.
+fn is_full_state(body: &Value, before: &Folders, after: &Folders) -> bool {
     body.get("isPartialResponse").and_then(Value::as_bool) != Some(true)
+        && before
+            .folders
+            .iter()
+            .all(|known| after.folders.iter().any(|folder| folder.id == known.id))
 }
 
 impl<T: CsaTransport> Pins<T> {
@@ -409,7 +414,10 @@ impl<T: CsaTransport> Pins<T> {
             match answer.status {
                 200..=299 => {
                     return match parse_folders(&answer.body) {
-                        Ok(current) if write.answer_is_state && is_full_state(&answer.body) => {
+                        Ok(current)
+                            if write.answer_is_state
+                                && is_full_state(&answer.body, &state, &current) =>
+                        {
                             Ok(current)
                         }
                         _ => self.folders().await,
