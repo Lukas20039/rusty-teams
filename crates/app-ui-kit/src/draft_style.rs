@@ -5,7 +5,7 @@ use gpui_kit::*;
 use teams_core::{Draft, FontSize, LineKind, MarkKind, SizeStep};
 
 use crate::render::blocks::{Script, StyleFlags};
-use crate::render::elements::{highlight_fill, readable_on};
+use crate::render::elements::{emoji_ranges, highlight_fill, readable_on};
 use app_base::theme;
 
 const CODE_PILL_RADIUS: f32 = 4.;
@@ -112,7 +112,14 @@ fn block_range(draft: &Draft, lines: Range<usize>) -> Range<usize> {
 }
 
 pub fn draft_style(draft: &Draft, mono: SharedString) -> DraftStyle {
-    let mut text = Vec::new();
+    let emoji_family = SharedString::from(theme::EMOJI_FONT_FAMILY);
+    let mut text: Vec<_> = emoji_ranges(draft.text())
+        .into_iter()
+        .map(|range| {
+            TextDecoration::new(range, HighlightStyle::default())
+                .with_font_family(emoji_family.clone())
+        })
+        .collect();
     let mut ranges = Vec::new();
     let mut markers = Vec::new();
     let indents = draft
@@ -225,6 +232,22 @@ mod tests {
             content: content.into(),
             marks: Vec::new(),
         }
+    }
+
+    #[test]
+    fn typed_emoji_get_the_emoji_font_first() {
+        let draft = Draft::from_markdown("hi 😅 `x😅`");
+        let style = draft_style(&draft, "Mono".into());
+        let text = draft.text();
+        let emoji: Vec<&str> = style
+            .text
+            .iter()
+            .take_while(|decoration| {
+                decoration.font_family.as_deref() == Some(app_base::theme::EMOJI_FONT_FAMILY)
+            })
+            .map(|decoration| &text[decoration.range.clone()])
+            .collect();
+        assert_eq!(emoji, ["😅", "😅"]);
     }
 
     #[test]
