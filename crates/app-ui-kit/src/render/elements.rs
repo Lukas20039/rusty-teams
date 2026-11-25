@@ -392,6 +392,14 @@ pub fn keycap_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
     ranges
 }
 
+/// Font fallback reaches DejaVu Sans before Noto Color Emoji, and DejaVu draws some emoji as outlines.
+pub fn emoji_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = keycap_ranges(text);
+    ranges.extend(teams_core::emoji_grapheme_ranges(text));
+    ranges.sort_by_key(|range| range.start);
+    ranges
+}
+
 /// gpui applies a font override only to a run that lies inside it, so every cut range gets runs of its own.
 pub fn split_highlights(
     highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
@@ -448,7 +456,7 @@ fn render_inline(inline: &Inline, id: String, own: bool, cx: &App) -> AnyElement
         .filter(|segment| segment.style.code)
         .map(|segment| (segment.range.clone(), mono.clone()))
         .chain(
-            keycap_ranges(&inline.text)
+            emoji_ranges(&inline.text)
                 .into_iter()
                 .map(|range| (range, emoji_family.clone())),
         )
@@ -461,7 +469,8 @@ fn render_inline(inline: &Inline, id: String, own: bool, cx: &App) -> AnyElement
         )
         .collect();
     font_overrides.sort_by_key(|(range, _)| range.start);
-    let keycaps = keycap_ranges(&inline.text);
+    font_overrides.dedup_by(|a, b| a.0 == b.0);
+    let keycaps = emoji_ranges(&inline.text);
     let emoji = inline.emoji();
     let highlights = highlights
         .into_iter()
