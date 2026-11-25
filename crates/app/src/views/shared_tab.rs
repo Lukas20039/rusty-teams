@@ -73,6 +73,10 @@ pub struct LibraryView<'a> {
     pub new_folder: Option<&'a Entity<InputState>>,
     pub status: Option<&'a str>,
     pub download_states: Vec<Option<DownloadState>>,
+    /// Replaces the library/messages switch at the start of the header.
+    pub lead: Option<AnyElement>,
+    pub web_label: &'a str,
+    pub empty: &'a str,
 }
 
 pub struct MessagesView<'a> {
@@ -144,7 +148,7 @@ fn switch(scope: SharedScope, run: &SharedRun) -> Div {
 
 fn tool_button(
     id: &'static str,
-    label: &'static str,
+    label: impl Into<SharedString>,
     glyph: IconName,
     command: SharedCommand,
     run: &SharedRun,
@@ -154,13 +158,14 @@ fn tool_button(
         .ghost()
         .compact()
         .icon(glyph)
-        .label(label)
+        .label(label.into())
         .on_click(move |_, window, cx| run(command, window, cx))
 }
 
 fn header(
     scope: SharedScope,
     has_library: bool,
+    lead: Option<AnyElement>,
     trailing: Option<AnyElement>,
     run: &SharedRun,
 ) -> Div {
@@ -171,7 +176,10 @@ fn header(
         .py(px(8.))
         .gap(px(12.))
         .items_center()
-        .when(has_library, |row| row.child(switch(scope, run)))
+        .map(|row| match lead {
+            Some(lead) => row.child(lead),
+            None => row.when(has_library, |row| row.child(switch(scope, run))),
+        })
         .children(trailing)
 }
 
@@ -385,8 +393,8 @@ fn centered() -> Div {
         .text_color(theme::text_muted())
 }
 
-fn centered_note(text: &'static str) -> Div {
-    centered().child(text)
+fn centered_note(text: &str) -> Div {
+    centered().child(text.to_owned())
 }
 
 fn new_folder_row(input: &Entity<InputState>) -> Div {
@@ -443,7 +451,7 @@ pub fn render_library(view: LibraryView, run: &SharedRun) -> AnyElement {
             ))
             .child(tool_button(
                 "library-open-sharepoint",
-                "Open in SharePoint \u{2197}",
+                view.web_label.to_owned(),
                 IconName::ExternalLink,
                 SharedCommand::OpenSharePoint,
                 run,
@@ -472,7 +480,7 @@ pub fn render_library(view: LibraryView, run: &SharedRun) -> AnyElement {
                 .into_any_element()
         }
         Listing::Ready(entries) if entries.is_empty() => {
-            centered_note(EMPTY_LIBRARY).into_any_element()
+            centered_note(view.empty).into_any_element()
         }
         Listing::Ready(entries) => v_flex()
             .id("library-rows")
@@ -491,7 +499,7 @@ pub fn render_library(view: LibraryView, run: &SharedRun) -> AnyElement {
     };
     v_flex()
         .size_full()
-        .child(header(SharedScope::Library, true, toolbar, run))
+        .child(header(SharedScope::Library, true, view.lead, toolbar, run))
         .children(view.new_folder.map(new_folder_row))
         .children(view.status.map(|status| {
             div()
@@ -682,6 +690,7 @@ pub fn render_messages(view: MessagesView, run: &SharedRun) -> AnyElement {
         .child(header(
             SharedScope::Messages,
             view.has_library,
+            None,
             Some(chips(view.filter, run)),
             run,
         ))

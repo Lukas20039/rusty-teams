@@ -19,6 +19,7 @@ use super::forward_dialog::{ForwardDialog, ForwardDialogEvent};
 use super::image_viewer::{ImageViewer, ImageViewerEvent};
 use super::manage_team_page::ManageTeamPage;
 use super::notice_toast::NoticeToasts;
+use super::onedrive_page::OneDrivePage;
 use super::profile_card::{ProfileCard, ProfileCardEvent};
 use super::quick_view_pane::{QuickViewEvent, QuickViewPane};
 use super::rail::RailView;
@@ -26,10 +27,10 @@ use super::shortcuts::{
     ClearChatFilters, DeclineCall, FilterMeetingChats, FilterMutedChats, FilterNonMeetingChats,
     FilterUnreadChats, FindInChat, HangUpCall, JoinMeetingFromToast, JumpToLastReadOrNewest,
     NextConversation, OpenActivity, OpenAgents, OpenCalendar, OpenCallsTab, OpenChannelsTab,
-    OpenChatFilter, OpenChatsTab, OpenLobbyList, OpenSaved, OpenSettings, PopOutSelectedChat,
-    PreviousConversation, PushToTalk, Scope, ShowShortcuts, StartAudioCall, StartVideoCall,
-    ToggleCallCamera, ToggleCallHand, ToggleCallShare, ZoomIn, ZoomOut, ZoomReset, ZoomShareIn,
-    ZoomShareOut, ZoomShareReset,
+    OpenChatFilter, OpenChatsTab, OpenLobbyList, OpenOneDrive, OpenSaved, OpenSettings,
+    PopOutSelectedChat, PreviousConversation, PushToTalk, Scope, ShowShortcuts, StartAudioCall,
+    StartVideoCall, ToggleCallCamera, ToggleCallHand, ToggleCallShare, ZoomIn, ZoomOut, ZoomReset,
+    ZoomShareIn, ZoomShareOut, ZoomShareReset,
 };
 use super::shortcuts_dialog::{ShortcutsDialog, ShortcutsDialogEvent};
 use super::sidebar::{SidebarEvent, SidebarTab, SidebarView};
@@ -194,6 +195,7 @@ pub struct AppShell {
     quick_pane: Entity<QuickViewPane>,
     manage_team_page: Entity<ManageTeamPage>,
     calls_page: Entity<CallsPage>,
+    onedrive_page: Entity<OneDrivePage>,
     shown_quick_view: Option<QuickView>,
     conversation: Entity<ConversationView>,
     switcher: Option<Entity<Switcher>>,
@@ -279,6 +281,7 @@ impl AppShell {
         let quick_pane = cx.new(|cx| QuickViewPane::new(state.clone(), activity.clone(), cx));
         let manage_team_page = cx.new(|cx| ManageTeamPage::new(state.clone(), window, cx));
         let calls_page = cx.new(|cx| CallsPage::new(state.clone(), window, cx));
+        let onedrive_page = cx.new(|_| OneDrivePage::new(state.clone()));
         let agents_panel = crate::agents::runs_handle(cx)
             .map(|runs| cx.new(|cx| crate::agents::AgentsPanel::new(runs, cx)));
         let agents_subscription = agents_panel.as_ref().map(|panel| {
@@ -451,6 +454,7 @@ impl AppShell {
             quick_pane,
             manage_team_page,
             calls_page,
+            onedrive_page,
             shown_quick_view: None,
             conversation,
             switcher: None,
@@ -1005,6 +1009,7 @@ impl AppShell {
         calendar_open: bool,
         quick_view_open: bool,
         calls_open: bool,
+        onedrive_open: bool,
         manage_team_open: bool,
     ) -> Div {
         h_flex()
@@ -1029,6 +1034,7 @@ impl AppShell {
                 },
             ))
             .child(match () {
+                _ if onedrive_open => self.onedrive_page.clone().into_any_element(),
                 _ if calls_open => self
                     .calls_page
                     .clone()
@@ -1106,13 +1112,15 @@ impl Render for AppShell {
         let calendar_tab = self.sidebar.read(cx).tab() == SidebarTab::Calendar;
         let chats_tab = self.sidebar.read(cx).tab() == SidebarTab::Chats;
         let calls_tab = self.sidebar.read(cx).tab() == SidebarTab::Calls;
+        let onedrive_open = self.sidebar.read(cx).tab() == SidebarTab::OneDrive;
         let splash = self.render_splash(cx);
         let state = self.state.read(cx);
         let calendar_open = calendar_tab;
         let quick_view_open = chats_tab && state.quick_view.is_some();
-        let manage_team_open = !calendar_tab && !calls_tab && state.manage_team.is_some();
+        let manage_team_open =
+            !calendar_tab && !calls_tab && !onedrive_open && state.manage_team.is_some();
         let calls_open = calls_tab;
-        let show_sidebar = !calendar_open && !calls_open;
+        let show_sidebar = !calendar_open && !calls_open && !onedrive_open;
         let banner = state
             .connection_banner_text()
             .filter(|_| !self.splash.is_up())
@@ -1250,6 +1258,11 @@ impl Render for AppShell {
                 this.sidebar
                     .update(cx, |sidebar, cx| sidebar.show_channels(cx));
             }))
+            .on_action(cx.listener(|this, _: &OpenOneDrive, window, cx| {
+                this.close_image_viewer(window, cx);
+                this.sidebar
+                    .update(cx, |sidebar, cx| sidebar.show_onedrive(cx));
+            }))
             .on_action(cx.listener(|this, _: &OpenCallsTab, window, cx| {
                 this.close_image_viewer(window, cx);
                 this.sidebar
@@ -1351,6 +1364,7 @@ impl Render for AppShell {
                             calendar_open,
                             quick_view_open,
                             calls_open,
+                            onedrive_open,
                             manage_team_open,
                         ),
                         &self.splash,

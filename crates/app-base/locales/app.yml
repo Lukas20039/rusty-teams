@@ -716,6 +716,9 @@ rail:
   agents:
     en: Agents
     de: Agents
+  onedrive:
+    en: OneDrive
+    de: OneDrive
   shortcut_activity:
     en: Open Activity
     de: Aktivität öffnen
@@ -2092,3 +2095,40 @@ regional:
     us:
       en: United States
       de: Vereinigte Staaten
+onedrive:
+  recent:
+    en: Recent
+    de: Zuletzt verwendet
+  my_files:
+    en: My files
+    de: Meine Dateien
+  shared:
+    en: Shared
+    de: Geteilt
+  open_web:
+    en: Open in OneDrive
+    de: In OneDrive öffnen
+  empty:
+    en: Nothing here yet.
+    de: Hier ist noch nichts.
+  not_connected:
+    en: not connected
+    de: nicht verbunden
+  link_copied:
+    en: Link copied
+    de: Link kopiert
+  folder_name:
+    en: Folder name
+    de: Ordnername
+  folder_failed:
+    en: Folder not created
+    de: Ordner nicht angelegt
+  upload_failed:
+    en: not uploaded
+    de: nicht hochgeladen
+  downloading:
+    en: Downloading
+    de: Lädt herunter
+  uploading:
+    en: Uploading
+    de: Lädt hoch

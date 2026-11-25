@@ -122,6 +122,7 @@ Feature parity with the Microsoft Teams desktop client.
 | Follow a channel, per-channel notifications | Done | Right-click > Notifications: banner and activity, activity only, off, include thread replies; synced with Teams; bell icons in the sidebar |
 | Channel tabs: tab bar, website and app tabs | Done | Posts, Shared, then the channel's tabs with overflow; website tabs embedded on Windows (WebView2), browser on Linux; app tabs open in Teams web |
 | Files tab | Done | "Shared" like Teams: In library (folders, upload, drag and drop, new folder, open in SharePoint) and In messages (files and links from posts) |
+| OneDrive page | Done | Rail entry (Ctrl+7) with Recent, My files and Shared through the session's Graph token, no extra sign-in: folders, upload, new folder, open in browser, download and open locally, copy link |
 
 ## Notifications
 
