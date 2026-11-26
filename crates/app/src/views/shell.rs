@@ -1042,7 +1042,13 @@ impl AppShell {
                 },
             ))
             .child(match side_page {
-                Some(page) => page.into_any_element(),
+                Some(page) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(page)
+                    .into_any_element(),
                 None => match () {
                     _ if calls_open => self
                         .calls_page

@@ -41,8 +41,11 @@ use crate::views::widgets::icon;
 use gpui_kit::base::POPUP_PRIORITY;
 
 const FOLDER_WIDTH: f32 = 220.;
+const FOLDER_WIDTHS: (f32, f32) = (160., 360.);
 const COLLAPSED_WIDTH: f32 = 48.;
 const LIST_WIDTH: f32 = 340.;
+const LIST_WIDTHS: (f32, f32) = (260., 720.);
+const HANDLE_WIDTH: f32 = 6.;
 const NOTIFIED_AT_ONCE: usize = 3;
 const ROW_HEIGHT: f32 = 50.;
 const MAX_REMOTE_IMAGE: usize = 15 * 1024 * 1024;
@@ -66,6 +69,12 @@ impl Global for MailFocus {}
 
 pub fn mail_unread(cx: &App) -> usize {
     cx.try_global::<MailUnread>().map_or(0, |unread| unread.0)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Column {
+    Folders,
+    List,
 }
 
 enum Load<T> {
@@ -143,6 +152,11 @@ pub struct MailPage {
     html_parts: Vec<Vec<Block>>,
     /// Remote images of the open mail left out until the user loads them.
     blocked_images: Vec<String>,
+    folder_width: f32,
+    list_width: f32,
+    /// The column being resized, the pointer x where the drag began and the width then.
+    // ponytail: widths live with the page; persist them in settings if a restart should keep them.
+    resizing: Option<(Column, Pixels, f32)>,
     /// The mail a right click opened the menu for, and where.
     row_menu: Option<(String, Point<Pixels>)>,
     compose: Option<Compose>,
@@ -188,6 +202,9 @@ impl MailPage {
             html_parts: Vec::new(),
             blocked_images: Vec::new(),
             row_menu: None,
+            folder_width: FOLDER_WIDTH,
+            list_width: LIST_WIDTH,
+            resizing: None,
             compose: None,
             search: None,
             folders_hidden: false,
@@ -890,19 +907,15 @@ impl MailPage {
                 .h_full()
                 .py(px(10.))
                 .items_center()
-                .border_r_1()
-                .border_color(theme::border())
                 .child(self.new_mail_button(cx).tooltip(tr("mail.new")))
                 .into_any_element();
         }
         let mut column = v_flex()
-            .w(px(FOLDER_WIDTH))
+            .w(px(self.folder_width))
             .flex_none()
             .h_full()
             .p(px(10.))
             .gap(px(2.))
-            .border_r_1()
-            .border_color(theme::border())
             .child(self.new_mail_button(cx).label(tr("mail.new")))
             .children(self.search.as_ref().map(|search| {
                 div()
@@ -975,11 +988,9 @@ impl MailPage {
                 .into_any_element(),
         };
         v_flex()
-            .w(px(LIST_WIDTH))
+            .w(px(self.list_width))
             .flex_none()
             .h_full()
-            .border_r_1()
-            .border_color(theme::border())
             .child(
                 h_flex()
                     .px(px(8.))
@@ -1095,7 +1106,7 @@ impl MailPage {
                     .child(
                         div()
                             .flex_none()
-                            .max_w(px(LIST_WIDTH * 0.6))
+                            .max_w(px(self.list_width * 0.6))
                             .truncate()
                             .font_weight(weight)
                             .text_color(if summary.is_read {
@@ -1115,6 +1126,59 @@ impl MailPage {
                     ),
             )
             .into_any_element()
+    }
+
+    fn handle(&self, column: Column, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self
+            .resizing
+            .is_some_and(|(resizing, ..)| resizing == column);
+        div()
+            .id(match column {
+                Column::Folders => "mail-resize-folders",
+                Column::List => "mail-resize-list",
+            })
+            .flex_none()
+            .w(px(HANDLE_WIDTH))
+            .h_full()
+            .flex()
+            .justify_center()
+            .cursor_col_resize()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                    let width = match column {
+                        Column::Folders => this.folder_width,
+                        Column::List => this.list_width,
+                    };
+                    this.resizing = Some((column, event.position.x, width));
+                    cx.stop_propagation();
+                    cx.notify();
+                }),
+            )
+            .child(div().w(px(1.)).h_full().bg(if active {
+                theme::accent()
+            } else {
+                theme::border()
+            }))
+    }
+
+    fn drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some((column, start, width)) = self.resizing else {
+            return;
+        };
+        if !event.dragging() {
+            self.resizing = None;
+            cx.notify();
+            return;
+        }
+        let moved = f32::from(event.position.x - start);
+        match column {
+            Column::Folders => {
+                self.folder_width = (width + moved).clamp(FOLDER_WIDTHS.0, FOLDER_WIDTHS.1)
+            }
+            Column::List => self.list_width = (width + moved).clamp(LIST_WIDTHS.0, LIST_WIDTHS.1),
+        }
+        cx.notify();
     }
 
     fn render_row_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1783,9 +1847,12 @@ fn mail_blocks(blocks: &[Block], id: &str, cx: &App) -> AnyElement {
             start = index + 1;
             if let Some(path) = url.strip_prefix("file://") {
                 column = column.child(
-                    img(PathBuf::from(path))
-                        .max_w(px(IMAGE_MAX_WIDTH))
-                        .object_fit(ObjectFit::ScaleDown),
+                    div().w_full().min_w_0().overflow_hidden().child(
+                        img(PathBuf::from(path))
+                            .max_w(px(IMAGE_MAX_WIDTH))
+                            .max_w_full()
+                            .object_fit(ObjectFit::ScaleDown),
+                    ),
                 );
             }
         }
@@ -1837,9 +1904,33 @@ impl Render for MailPage {
             .debug_selector(|| "shell/mail".into())
             .size_full()
             .bg(theme::surface())
+            .overflow_hidden()
+            .on_mouse_move(cx.listener(|this, event, _, cx| this.drag(event, cx)))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.resizing.take().is_some() {
+                        cx.notify();
+                    }
+                }),
+            )
             .child(self.render_folders(cx))
+            .when(!self.folders_hidden, |page| {
+                page.child(self.handle(Column::Folders, cx))
+            })
+            .when(self.folders_hidden, |page| {
+                page.child(div().w(px(1.)).h_full().bg(theme::border()))
+            })
             .child(self.render_list(cx))
-            .child(div().flex_1().min_w_0().h_full().child(right))
+            .child(self.handle(Column::List, cx))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_hidden()
+                    .child(right),
+            )
             .children(self.render_row_menu(cx))
     }
 }
