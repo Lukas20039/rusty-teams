@@ -141,22 +141,27 @@ impl<T: MessageTransport> Messages<T> {
         message_id: &str,
         html: &str,
     ) -> Result<()> {
-        self.edit_message_with_mentions(conversation, message_id, html, None)
+        self.edit_message_with_mentions(conversation, message_id, html, None, None)
             .await
     }
 
     /// `mentions` is the JSON text of the chatsvc mention entries for the spans in `html`.
+    /// The PUT replaces the properties, so a channel post's `subject` has to be sent again.
     pub async fn edit_message_with_mentions(
         &self,
         conversation: &ConversationRef,
         message_id: &str,
         html: &str,
         mentions: Option<&str>,
+        subject: Option<&str>,
     ) -> Result<()> {
         let url = self.message_url(conversation, message_id);
         let mut body = edit_body(message_id, html);
         if let Some(mentions) = mentions {
             body["properties"]["mentions"] = json!(mentions);
+        }
+        if let Some(subject) = subject {
+            body["properties"]["subject"] = json!(subject);
         }
         let mut answer = self.put(&url, &body).await?;
         if answer.status == 404 {

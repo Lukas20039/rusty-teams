@@ -5,6 +5,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 
 use crate::banner_image::prepare_banner_image;
+use crate::outgoing::Outgoing;
 use teams_core::{AnnouncementBanner, BannerBackground};
 
 use super::{COMPOSER_BUTTON_SIZE, COMPOSER_ICON_SIZE, Composer, ComposerEvent};
@@ -421,6 +422,64 @@ impl Composer {
                             ),
                         )
                         .child(swatches),
+                ),
+        )
+    }
+
+    pub(super) fn restore_edit_subject(
+        &mut self,
+        outgoing: &Outgoing,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.edit_subject = outgoing
+            .subject
+            .clone()
+            .filter(|_| outgoing.edit.is_some())
+            .map(|subject| {
+                let input =
+                    cx.new(|cx| InputState::new(window, cx).placeholder(SUBJECT_PLACEHOLDER));
+                input.update(cx, |input, cx| input.set_value(subject, window, cx));
+                input
+            });
+    }
+
+    pub(super) fn edit_subject_text(&self, cx: &App) -> Option<String> {
+        let subject = self.edit_subject.as_ref()?;
+        Some(subject.read(cx).value().trim().to_owned())
+    }
+
+    /// The subject line above the body while a channel post is edited.
+    pub(super) fn render_edit_subject(&self) -> Option<Div> {
+        let subject = self
+            .edit_subject
+            .clone()
+            .filter(|_| self.editing.is_some())?;
+        Some(
+            v_flex()
+                .w_full()
+                .child(
+                    div()
+                        .debug_selector(|| POST_CARD_SUBJECT_TAG.into())
+                        .w_full()
+                        .px(px(SUBJECT_INSET))
+                        .py(px(6.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(
+                            Input::new(&subject)
+                                .appearance(false)
+                                .bordered(false)
+                                .h(px(SUBJECT_SIZE * SUBJECT_LINE))
+                                .line_height(px(SUBJECT_SIZE * SUBJECT_LINE))
+                                .with_size(Size::Size(px(SUBJECT_SIZE / INPUT_TEXT_SCALE))),
+                        ),
+                )
+                .child(
+                    div()
+                        .debug_selector(|| POST_CARD_DIVIDER_TAG.into())
+                        .w_full()
+                        .h(px(1.))
+                        .bg(theme::border()),
                 ),
         )
     }

@@ -3412,10 +3412,11 @@ impl ConversationView {
         } else {
             Vec::new()
         };
+        let post_root = !in_chat && record.reply_to_id.is_none();
         let draft = Outgoing {
             banner: None,
             draft: message_draft(&record),
-            subject: None,
+            subject: post_root.then(|| record.subject.clone().unwrap_or_default()),
             mentions,
             reply: None,
             edit: Some(edit),
@@ -3461,6 +3462,9 @@ impl ConversationView {
             if let Some(mut record) = self.own_record(&edit.message_id, cx) {
                 record.body_html = outgoing.html();
                 record.edited_at = Some(Utc::now());
+                if outgoing.subject.is_some() {
+                    record.subject = outgoing.subject.clone();
+                }
                 let _ = store.upsert_messages(std::slice::from_ref(&record));
                 self.rebuild(false, cx);
             }
@@ -3478,6 +3482,9 @@ impl ConversationView {
         if let Some(mut record) = original.clone() {
             record.body_html = outgoing.html();
             record.edited_at = Some(Utc::now());
+            if outgoing.subject.is_some() {
+                record.subject = outgoing.subject.clone();
+            }
             let _ = store.upsert_messages(std::slice::from_ref(&record));
         }
         let message_id = edit.message_id.clone();
@@ -3492,6 +3499,7 @@ impl ConversationView {
                     &edit.message_id,
                     &sent.html(),
                     &sent.mentions,
+                    sent.subject.as_deref(),
                 )
                 .await
         });

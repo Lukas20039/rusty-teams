@@ -76,6 +76,30 @@ async fn edit_chat_puts_the_message_object() {
 }
 
 #[tokio::test]
+async fn editing_a_post_sends_its_subject_again() {
+    let mock = Mock::new(&[200, 200]);
+    let post = ConversationRef::channel_root("19:c@thread.tacv2");
+    messages(&mock)
+        .edit_message_with_mentions(&post, "m1", "x", None, Some("Release plan"))
+        .await
+        .unwrap();
+    messages(&mock)
+        .edit_message(&post, "m1", "x")
+        .await
+        .unwrap();
+    let requests = mock.requests();
+    assert_eq!(
+        requests[0].body.as_ref().unwrap()["properties"]["subject"],
+        "Release plan"
+    );
+    assert!(
+        requests[1].body.as_ref().unwrap()["properties"]
+            .get("subject")
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn channel_reply_encodes_the_messageid_suffix() {
     let mock = Mock::new(&[200]);
     messages(&mock)
