@@ -743,21 +743,25 @@ impl<R: Remote> SyncEngine<R> {
             message_id,
             &markdown_to_html(markdown),
             mentions,
+            None,
         )
         .await
     }
 
+    /// A blank or missing `subject` keeps the post's current one.
     pub async fn edit_message_html(
         &self,
         conversation_id: &str,
         message_id: &str,
         html: &str,
         mentions: &[MentionInput],
+        subject: Option<&str>,
     ) -> Result<()> {
         let conversation = self.resolve(conversation_id).await?;
         let (mut html, mentions) = outgoing(&conversation, html, mentions)?;
         let target = self.message_target(conversation_id, message_id)?;
         let mut extras = MessageExtras::default();
+        let mut kept_subject = None;
         if let Some(record) = self
             .store
             .messages_by_id(conversation_id, &[message_id.to_owned()])?
@@ -767,9 +771,14 @@ impl<R: Remote> SyncEngine<R> {
             html.push_str(&preserved.images_html);
             extras.files = preserved.files;
             extras.kept = preserved.kept;
+            kept_subject = record.subject;
         }
+        let subject = subject
+            .map(str::trim)
+            .filter(|subject| !subject.is_empty())
+            .or(kept_subject.as_deref());
         self.remote
-            .edit_message(&target, &html, &mentions, &extras)
+            .edit_message(&target, &html, &mentions, &extras, subject)
             .await?;
         self.refresh_message(conversation_id, message_id).await?;
         Ok(())

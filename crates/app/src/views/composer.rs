@@ -263,6 +263,7 @@ pub struct Composer {
     format_overflow: bool,
     format_bar: HashSet<String>,
     post_subject: Option<Entity<InputState>>,
+    edit_subject: Option<Entity<InputState>>,
     announcement: Option<post::AnnouncementDraft>,
     audience: Option<(String, usize)>,
     active_cell: Option<(String, teams_core::Cell)>,
@@ -540,6 +541,7 @@ impl Composer {
             format_overflow: false,
             format_bar: HashSet::new(),
             post_subject: None,
+            edit_subject: None,
             announcement: None,
             audience: None,
             active_cell: None,
@@ -1929,7 +1931,11 @@ impl Composer {
         }
         Outgoing {
             draft,
-            subject: self.post_subject_text(cx),
+            subject: if self.editing.is_some() {
+                self.edit_subject_text(cx)
+            } else {
+                self.post_subject_text(cx)
+            },
             mentions,
             reply: self.reply.clone(),
             edit: self.editing.clone(),
@@ -2489,6 +2495,7 @@ impl Composer {
         self.load_draft(outgoing.draft.clone(), content, window, cx);
         self.reply = outgoing.reply.clone();
         self.editing = outgoing.edit.clone();
+        self.restore_edit_subject(outgoing, window, cx);
         self.link.restore(outgoing.link_preview.clone());
         if outgoing.edit.is_none() {
             self.restore_announcement(outgoing.banner.as_ref(), window, cx);
@@ -3105,7 +3112,9 @@ impl Render for Composer {
         } else {
             (Some(actions.ml(px(COMPOSER_BUTTON_INSET))), None, None)
         };
-        let post_header = self.render_post_header(cx);
+        let post_header = self
+            .render_post_header(cx)
+            .or_else(|| self.render_edit_subject());
         let composer = cx.weak_entity();
         let tokens_composer = composer.clone();
         let input = Textarea::new(&self.input)

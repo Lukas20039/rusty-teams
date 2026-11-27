@@ -178,6 +178,7 @@ pub trait Remote {
         html: &str,
         mentions: &[OutgoingMention],
         extras: &MessageExtras,
+        subject: Option<&str>,
     ) -> Result<()>;
     async fn soft_delete_message(&self, user_id: &str, target: &MessageTarget) -> Result<()>;
     async fn undo_soft_delete_message(&self, user_id: &str, target: &MessageTarget) -> Result<()>;
@@ -964,12 +965,19 @@ impl Remote for Graph {
         html: &str,
         mentions: &[OutgoingMention],
         extras: &MessageExtras,
+        subject: Option<&str>,
     ) -> Result<()> {
         match chatsvc_conversation(target) {
             Some(conversation) if mentions.is_empty() => {
                 let html = format!("{}{html}{}", extras.kept_html(), extras.files_html());
                 Ok(Messages::new(self.session())
-                    .edit_message(&conversation, target.message_id(), &html)
+                    .edit_message_with_mentions(
+                        &conversation,
+                        target.message_id(),
+                        &html,
+                        None,
+                        subject,
+                    )
                     .await?)
             }
             Some(conversation @ ConversationRef::Chat { .. }) => {
@@ -988,6 +996,7 @@ impl Remote for Graph {
                         target.message_id(),
                         &html,
                         Some(&serde_json::Value::Array(entries).to_string()),
+                        subject,
                     )
                     .await?)
             }

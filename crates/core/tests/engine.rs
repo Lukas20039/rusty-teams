@@ -108,6 +108,7 @@ struct Fake {
     external_requests: Mutex<Vec<String>>,
     mentions_sent: Mutex<Vec<Vec<OutgoingMention>>>,
     extras_sent: Mutex<Vec<MessageExtras>>,
+    subjects_sent: Mutex<Vec<Option<String>>>,
     chatsvc_posts: Mutex<Vec<(String, String, String, serde_json::Value)>>,
     folder_requests: Mutex<usize>,
     directory_users: Mutex<Vec<User>>,
@@ -698,8 +699,13 @@ impl Remote for Handle {
         html: &str,
         mentions: &[OutgoingMention],
         extras: &MessageExtras,
+        subject: Option<&str>,
     ) -> Result<()> {
         self.record(format!("edit {} {html}", describe(target)));
+        self.subjects_sent
+            .lock()
+            .unwrap()
+            .push(subject.map(str::to_owned));
         self.mentions_sent.lock().unwrap().push(mentions.to_vec());
         self.extras_sent.lock().unwrap().push(extras.clone());
         Ok(())
@@ -2329,6 +2335,40 @@ async fn an_edit_keeps_the_images_and_files_of_the_original() {
 }
 
 #[tokio::test]
+async fn an_edit_keeps_the_post_subject_unless_a_new_one_is_given() {
+    let fake = Arc::new(Fake::default());
+    let engine = chat_engine(&fake, small_pages()).await;
+    engine
+        .store()
+        .upsert_messages(&[store::MessageRecord {
+            conversation_id: CHAT.into(),
+            message_id: "m-post".into(),
+            created_at: base(),
+            body_html: "<p>old</p>".into(),
+            subject: Some("Release plan".into()),
+            reactions_json: "[]".into(),
+            mentions_json: "[]".into(),
+            ..Default::default()
+        }])
+        .unwrap();
+
+    for subject in [None, Some("  "), Some(" Code freeze ")] {
+        let _ = engine
+            .edit_message_html(CHAT, "m-post", "<p>new</p>", &[], subject)
+            .await;
+    }
+
+    assert_eq!(
+        *fake.subjects_sent.lock().unwrap(),
+        [
+            Some("Release plan".to_owned()),
+            Some("Release plan".to_owned()),
+            Some("Code freeze".to_owned()),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn download_streams_every_chunk_and_reports_progress() {
     let fake = Arc::new(Fake::default());
     let engine = chat_engine(&fake, small_pages()).await;
@@ -2506,7 +2546,7 @@ async fn the_notes_chat_takes_every_write_without_a_graph_chat_lookup() {
         .await
         .unwrap();
     engine
-        .edit_message_html(NOTES_CHAT_ID, &sent.message_id, "edited", &[])
+        .edit_message_html(NOTES_CHAT_ID, &sent.message_id, "edited", &[], None)
         .await
         .unwrap();
     engine

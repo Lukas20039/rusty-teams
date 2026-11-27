@@ -38,6 +38,7 @@ async fn main() {
             &message_id,
             "<p>rusty-teams notes probe edited</p>",
             &[],
+            None,
         )
         .await;
     println!("# engine edit: {}", outcome(&edit));
